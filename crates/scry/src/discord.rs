@@ -47,14 +47,14 @@ fn embed(s: &MatchSummary) -> Value {
 
     json!({
         "embeds": [{
-            // Champion icon rides as the small author avatar; a top-right
-            // thumbnail would squeeze the field grid down to two columns.
-            "author": { "name": s.player, "url": s.profile_url, "icon_url": s.icon_url },
+            "author": { "name": s.player, "url": s.profile_url },
             "title": format!("{} — {result}", s.champion),
-            "url": s.match_url,
+            "url": s.profile_url,
             "color": color,
-            // Six inline fields = two clean rows of three, then a full-width
-            // Wards line.
+            // Large champion icon, top-right. A thumbnail makes Discord render
+            // inline fields ~two-per-row, so the six stats stay even (2+2+2)
+            // and don't wrap raggedly the way an odd count would.
+            "thumbnail": { "url": s.icon_url },
             "fields": [
                 { "name": "KDA", "value": format!("{}/{}/{} ({:.2})", s.kills, s.deaths, s.assists, s.kda()), "inline": true },
                 { "name": "CS", "value": format!("{} ({:.1}/min)", s.cs, s.cs_per_min), "inline": true },
@@ -77,7 +77,7 @@ fn thousands(n: i32) -> String {
     let digits = n.unsigned_abs().to_string();
     let mut out = String::new();
     for (i, ch) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(ch);

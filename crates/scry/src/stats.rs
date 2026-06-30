@@ -14,7 +14,6 @@ pub struct MatchSummary {
     pub champion: String,
     pub icon_url: String,
     pub profile_url: String,
-    pub match_url: String,
     pub win: bool,
     pub duration_secs: i64,
     pub kills: i32,
@@ -72,13 +71,6 @@ pub fn summarize(game: &Match, puuid: &str, ctx: &RenderContext) -> Option<Match
     let tag_line =
         non_empty(p.riot_id_tagline.clone()).unwrap_or_else(|| ctx.fallback_tag.to_owned());
 
-    // "NA1_5592214271" -> "5592214271" for the League of Graphs match URL.
-    let numeric_id = game
-        .metadata
-        .match_id
-        .rsplit_once('_')
-        .map_or(game.metadata.match_id.as_str(), |(_, n)| n);
-
     Some(MatchSummary {
         player: format!("{game_name} #{tag_line}"),
         champion: champion_name,
@@ -90,10 +82,6 @@ pub fn summarize(game: &Match, puuid: &str, ctx: &RenderContext) -> Option<Match
             ctx.region_slug,
             urlencoding::encode(&game_name),
             urlencoding::encode(&tag_line),
-        ),
-        match_url: format!(
-            "https://www.leagueofgraphs.com/match/{}/{}",
-            ctx.region_slug, numeric_id,
         ),
         win: p.win,
         duration_secs,
