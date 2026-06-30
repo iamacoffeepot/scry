@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 
-/// Dump one match's raw data under `<dir>/<matchId>/` for offline AI analysis:
+/// Dump one match's raw data under `<dir>/<platform>/<id>/` — e.g.
+/// `<dir>/NA1/5592214271/` — for offline AI analysis:
 ///   - `match.json`            — full match-v5 detail, pretty-printed
 ///   - `timeline-events.jsonl` — every timeline event, one per line (grep-friendly)
 ///   - `timeline-frames.jsonl` — one per-minute frame per line, slimmed to the
@@ -12,7 +13,11 @@ use serde_json::{Value, json};
 ///
 /// Returns the directory written.
 pub fn write(dir: &Path, match_id: &str, match_json: &Value, timeline: &Value) -> Result<PathBuf> {
-    let out = dir.join(match_id);
+    // Group dumps by platform: "NA1_5592214271" -> <dir>/NA1/5592214271/.
+    let out = match match_id.split_once('_') {
+        Some((platform, id)) => dir.join(platform).join(id),
+        None => dir.join(match_id),
+    };
     fs::create_dir_all(&out).with_context(|| format!("creating {}", out.display()))?;
 
     fs::write(out.join("match.json"), serde_json::to_vec_pretty(match_json)?)

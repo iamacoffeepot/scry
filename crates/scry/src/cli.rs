@@ -27,7 +27,7 @@ pub struct Cli {
     pub count: i32,
 
     /// Instead of posting, archive each match's raw data (match.json +
-    /// timeline JSONL) under <dir>/<matchId>/ for offline analysis.
+    /// timeline JSONL) under <dir>/<platform>/<id>/ for offline analysis.
     #[arg(long)]
     pub dump: Option<PathBuf>,
 }
