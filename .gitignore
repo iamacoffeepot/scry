@@ -1,0 +1,31 @@
+# --- secrets / env ---
+.env
+.env.*
+!.env.example
+
+# --- OS / editor ---
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# --- Claude Code ---
+# Skills are local by default; opt the project-process skills into the repo
+# with targeted negations below. The `*` glob is required because gitignore
+# can't re-include a file whose parent dir is excluded.
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+.claude/worktrees/
+.claude/skills/*
+!.claude/skills/adr/
+!.claude/skills/approve/
+!.claude/skills/bounce/
+!.claude/skills/implement/
+!.claude/skills/land/
+!.claude/skills/release-init/
+!.claude/skills/retrospect/
+!.claude/skills/scope/
+!.claude/skills/scope-spinoff/
+!.claude/skills/sketch/
+!.claude/skills/sweep/
+!.claude/skills/wish/
