@@ -10,6 +10,7 @@ use riven::models::match_v5::Match;
 pub struct Client {
     api: RiotApi,
     regional: RegionalRoute,
+    platform: PlatformRoute,
 }
 
 impl Client {
@@ -18,7 +19,26 @@ impl Client {
         Ok(Self {
             api: RiotApi::new(api_key),
             regional: platform.to_regional(),
+            platform,
         })
+    }
+
+    /// Region slug used by OP.GG / League of Graphs match URLs (na, euw, kr, …).
+    pub fn region_slug(&self) -> &'static str {
+        match self.platform {
+            PlatformRoute::NA1 => "na",
+            PlatformRoute::EUW1 => "euw",
+            PlatformRoute::EUN1 => "eune",
+            PlatformRoute::KR => "kr",
+            PlatformRoute::BR1 => "br",
+            PlatformRoute::JP1 => "jp",
+            PlatformRoute::LA1 => "lan",
+            PlatformRoute::LA2 => "las",
+            PlatformRoute::OC1 => "oce",
+            PlatformRoute::TR1 => "tr",
+            PlatformRoute::RU => "ru",
+            _ => "na",
+        }
     }
 
     /// Resolve a `gameName#tagLine` Riot ID to its PUUID via account-v1.

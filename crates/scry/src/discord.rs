@@ -47,8 +47,11 @@ fn embed(s: &MatchSummary) -> Value {
 
     json!({
         "embeds": [{
+            "author": { "name": s.player, "url": s.profile_url },
             "title": format!("{} — {result}", s.champion),
+            "url": s.match_url,
             "color": color,
+            "thumbnail": { "url": s.icon_url },
             "fields": [
                 { "name": "KDA", "value": format!("{}/{}/{} ({:.2})", s.kills, s.deaths, s.assists, s.kda()), "inline": true },
                 { "name": "CS", "value": format!("{} ({:.1}/min)", s.cs, s.cs_per_min), "inline": true },

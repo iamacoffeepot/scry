@@ -1,8 +1,20 @@
 use riven::models::match_v5::Match;
 
+/// Per-render context: the things the embed needs that aren't in the match data
+/// (which web region to link, and a display-name fallback if Riot omits it).
+pub struct RenderContext<'a> {
+    pub region_slug: &'a str,
+    pub fallback_name: &'a str,
+    pub fallback_tag: &'a str,
+}
+
 /// A flattened, post-ready summary of one player's performance in one match.
 pub struct MatchSummary {
+    pub player: String,
     pub champion: String,
+    pub icon_url: String,
+    pub profile_url: String,
+    pub match_url: String,
     pub win: bool,
     pub duration_secs: i64,
     pub kills: i32,
@@ -36,17 +48,53 @@ impl MatchSummary {
 }
 
 /// Build a summary for the participant matching `puuid`, or `None` if absent.
-pub fn summarize(game: &Match, puuid: &str) -> Option<MatchSummary> {
+pub fn summarize(game: &Match, puuid: &str, ctx: &RenderContext) -> Option<MatchSummary> {
     let info = &game.info;
     let p = info.participants.iter().find(|p| p.puuid == puuid)?;
 
     let duration_secs = info.game_duration;
-    // Guard against div-by-zero on remakes/zero-length games.
+    // Guard against div-by-zero on remakes / zero-length games.
     let minutes = (duration_secs as f64 / 60.0).max(1.0 / 60.0);
     let cs = p.total_minions_killed + p.neutral_minions_killed;
 
+    // `.champion()` resolves the numeric id (falling back to champion_name if
+    // Riot returned a corrupted id). The numeric id keys a Community Dragon
+    // icon directly, which avoids DDragon's name-key quirks (Wukong/Fiddlesticks).
+    let champion = p.champion().ok();
+    let champion_id: i16 = champion.map(i16::from).unwrap_or(-1);
+    let champion_name = champion
+        .and_then(|c| c.name())
+        .map(str::to_owned)
+        .unwrap_or_else(|| p.champion_name.clone());
+
+    let game_name =
+        non_empty(p.riot_id_game_name.clone()).unwrap_or_else(|| ctx.fallback_name.to_owned());
+    let tag_line =
+        non_empty(p.riot_id_tagline.clone()).unwrap_or_else(|| ctx.fallback_tag.to_owned());
+
+    // "NA1_5592214271" -> "5592214271" for the League of Graphs match URL.
+    let numeric_id = game
+        .metadata
+        .match_id
+        .rsplit_once('_')
+        .map_or(game.metadata.match_id.as_str(), |(_, n)| n);
+
     Some(MatchSummary {
-        champion: p.champion_name.clone(),
+        player: format!("{game_name} #{tag_line}"),
+        champion: champion_name,
+        icon_url: format!(
+            "https://raw.communitydragon.org/latest/plugins/rcp-be-lol-game-data/global/default/v1/champion-icons/{champion_id}.png"
+        ),
+        profile_url: format!(
+            "https://www.op.gg/summoners/{}/{}-{}",
+            ctx.region_slug,
+            urlencoding::encode(&game_name),
+            urlencoding::encode(&tag_line),
+        ),
+        match_url: format!(
+            "https://www.leagueofgraphs.com/match/{}/{}",
+            ctx.region_slug, numeric_id,
+        ),
         win: p.win,
         duration_secs,
         kills: p.kills,
@@ -64,4 +112,8 @@ pub fn summarize(game: &Match, puuid: &str) -> Option<MatchSummary> {
             control_wards_bought: p.vision_wards_bought_in_game,
         },
     })
+}
+
+fn non_empty(s: Option<String>) -> Option<String> {
+    s.filter(|v| !v.is_empty())
 }

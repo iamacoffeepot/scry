@@ -32,12 +32,23 @@ async fn run(cli: Cli) -> Result<()> {
         return Ok(());
     }
 
+    // Fallback display name/tag if Riot omits them on the participant.
+    let (fallback_name, fallback_tag) = cli
+        .riot_id
+        .split_once('#')
+        .unwrap_or((cli.riot_id.as_str(), ""));
+    let ctx = stats::RenderContext {
+        region_slug: client.region_slug(),
+        fallback_name,
+        fallback_tag,
+    };
+
     let webhook = discord::Webhook::new(cli.webhook);
 
     // Oldest -> newest so the channel reads chronologically.
     for match_id in match_ids.into_iter().rev() {
         let game = client.match_detail(&match_id).await?;
-        let Some(summary) = stats::summarize(&game, &puuid) else {
+        let Some(summary) = stats::summarize(&game, &puuid, &ctx) else {
             tracing::warn!(%match_id, "player not found in match participants; skipping");
             continue;
         };
