@@ -1,3 +1,4 @@
+mod archive;
 mod cli;
 mod discord;
 mod riot;
@@ -29,6 +30,17 @@ async fn run(cli: Cli) -> Result<()> {
     let match_ids = client.recent_match_ids(&puuid, cli.count).await?;
     if match_ids.is_empty() {
         tracing::warn!("no recent matches found for {}", cli.riot_id);
+        return Ok(());
+    }
+
+    // Archive mode: dump raw match + timeline data for offline analysis, no post.
+    if let Some(dump_dir) = cli.dump.as_deref() {
+        for match_id in match_ids.into_iter().rev() {
+            let match_json = client.raw_match_json(&match_id).await?;
+            let timeline = client.raw_timeline_json(&match_id).await?;
+            let out = archive::write(dump_dir, &match_id, &match_json, &timeline)?;
+            tracing::info!(%match_id, path = %out.display(), "archived match data");
+        }
         return Ok(());
     }
 

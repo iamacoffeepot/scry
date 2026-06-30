@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use clap::Parser;
 
 /// Fetch a player's recent League matches and post stat summaries to a Discord webhook.
@@ -23,4 +25,9 @@ pub struct Cli {
     /// Number of most-recent matches to summarize.
     #[arg(long, default_value_t = 1)]
     pub count: i32,
+
+    /// Instead of posting, archive each match's raw data (match.json +
+    /// timeline JSONL) under <dir>/<matchId>/ for offline analysis.
+    #[arg(long)]
+    pub dump: Option<PathBuf>,
 }

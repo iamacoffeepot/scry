@@ -2,6 +2,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use riven::RiotApi;
 use riven::consts::{PlatformRoute, RegionalRoute};
 use riven::models::match_v5::Match;
+use serde_json::Value;
 
 /// Thin wrapper over `riven` pinned to a single regional route.
 ///
@@ -11,6 +12,9 @@ pub struct Client {
     api: RiotApi,
     regional: RegionalRoute,
     platform: PlatformRoute,
+    // Held for the raw-JSON archive path (riven exposes only typed models).
+    api_key: String,
+    http: reqwest::Client,
 }
 
 impl Client {
@@ -20,7 +24,48 @@ impl Client {
             api: RiotApi::new(api_key),
             regional: platform.to_regional(),
             platform,
+            api_key: api_key.to_owned(),
+            http: reqwest::Client::new(),
         })
+    }
+
+    /// Raw match-v5 detail JSON, exactly as Riot returns it (captures fields
+    /// riven's typed model may not cover yet).
+    pub async fn raw_match_json(&self, match_id: &str) -> Result<Value> {
+        self.raw_get(&format!("/lol/match/v5/matches/{match_id}")).await
+    }
+
+    /// Raw match-v5 timeline JSON.
+    pub async fn raw_timeline_json(&self, match_id: &str) -> Result<Value> {
+        self.raw_get(&format!("/lol/match/v5/matches/{match_id}/timeline"))
+            .await
+    }
+
+    async fn raw_get(&self, path: &str) -> Result<Value> {
+        let url = format!("https://{}.api.riotgames.com{path}", self.regional_host());
+        let resp = self
+            .http
+            .get(&url)
+            .header("X-Riot-Token", &self.api_key)
+            .send()
+            .await
+            .with_context(|| format!("GET {url}"))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            bail!("Riot returned {status} for {url}: {body}");
+        }
+        resp.json::<Value>().await.context("parsing Riot JSON")
+    }
+
+    fn regional_host(&self) -> &'static str {
+        match self.regional {
+            RegionalRoute::AMERICAS => "americas",
+            RegionalRoute::ASIA => "asia",
+            RegionalRoute::EUROPE => "europe",
+            RegionalRoute::SEA => "sea",
+            _ => "americas",
+        }
     }
 
     /// Region slug used by OP.GG / League of Graphs match URLs (na, euw, kr, …).

@@ -1,6 +1,9 @@
 # --- rust build artifacts ---
 /target/
 
+# --- archived match dumps (raw Riot data for offline analysis) ---
+/archive/
+
 # --- secrets / env ---
 .env
 .env.*
