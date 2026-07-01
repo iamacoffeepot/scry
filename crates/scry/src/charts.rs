@@ -29,7 +29,6 @@ const BG: RGBColor = RGBColor(43, 45, 49); // #2B2D31
 const FG: RGBColor = RGBColor(219, 222, 225); // near-white text
 const GRID: RGBColor = RGBColor(70, 74, 81); // subtle axis/lines
 const GREEN: RGBColor = RGBColor(87, 242, 135); // #57F287 (tracked player)
-const BLURPLE: RGBColor = RGBColor(88, 101, 242); // #5865F2 (ranking bars)
 const ALLY: RGBColor = RGBColor(59, 130, 246); // #3B82F6 blue (your team)
 const ENEMY: RGBColor = RGBColor(237, 66, 69); // #ED4245 red (enemy team)
 
@@ -58,6 +57,20 @@ fn px(n: u32) -> u32 {
     n * SS
 }
 
+/// Insert spaces at camelCase boundaries: "LeeSin" -> "Lee Sin".
+fn spaced_name(name: &str) -> String {
+    let mut out = String::new();
+    let mut prev_lower = false;
+    for c in name.chars() {
+        if prev_lower && c.is_uppercase() {
+            out.push(' ');
+        }
+        out.push(c);
+        prev_lower = c.is_lowercase();
+    }
+    out
+}
+
 /// A text style at the given (logical) point size, scaled for supersampling.
 fn caption(size: u32) -> TextStyle<'static> {
     ("sans-serif", (size * SS) as i32).into_font().color(&FG)
@@ -70,10 +83,17 @@ const TITLE_STRIP: u32 = 44;
 fn draw_title(area: &Area, title: &str, size: u32, center_x: i32) -> Drawn {
     let style = (FONT, (size * SS) as i32)
         .into_font()
-        .style(FontStyle::Bold)
         .color(&FG)
         .pos(Pos::new(HPos::Center, VPos::Top));
-    area.draw(&Text::new(title.to_string(), (center_x, px(10) as i32), style))?;
+    let y = px(10) as i32;
+    // Faux-bold: Share Tech Mono ships one weight, so overdraw a 1px box smear.
+    for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+        area.draw(&Text::new(
+            title.to_string(),
+            (center_x + dx, y + dy),
+            style.clone(),
+        ))?;
+    }
     Ok(())
 }
 
@@ -95,8 +115,9 @@ pub fn dashboard(game: &Match, frames_jsonl: &str, puuid: &str, out: &Path) -> R
     {
         let root = BitMapBackend::with_buffer(&mut buf, (w, h)).into_drawing_area();
         root.fill(&BG).map_err(|e| anyhow!("chart fill: {e}"))?;
+        let canvas = root.margin(px(20), 0, 0, 0); // extra breathing room up top
 
-        let (top, bottom) = root.split_vertically(TOP_H * SS);
+        let (top, bottom) = canvas.split_vertically(TOP_H * SS);
         // Bottom row with equal padding: [pad][damage][pad][ranking][pad].
         let pad = w / 24;
         let chart_w = (w - 3 * pad) / 2;
@@ -107,7 +128,7 @@ pub fn dashboard(game: &Match, frames_jsonl: &str, puuid: &str, out: &Path) -> R
 
         draw_gold(&top, game, frames_jsonl, puuid).map_err(|e| anyhow!("gold chart: {e}"))?;
         draw_damage(&bottom_left, game, puuid).map_err(|e| anyhow!("damage chart: {e}"))?;
-        draw_ranking(&bottom_right, game, puuid).map_err(|e| anyhow!("ranking chart: {e}"))?;
+        draw_matchup(&bottom_right, game, puuid).map_err(|e| anyhow!("matchup chart: {e}"))?;
 
         root.present().map_err(|e| anyhow!("chart present: {e}"))?;
     }
@@ -202,7 +223,7 @@ fn draw_damage(area: &Area, game: &Match, puuid: &str) -> Drawn {
         .iter()
         .map(|p| {
             (
-                p.champion_name.clone(),
+                spaced_name(&p.champion_name),
                 p.total_damage_dealt_to_champions as i64,
                 p.puuid == puuid,
                 p.team_id == player_team,
@@ -263,29 +284,61 @@ fn draw_damage(area: &Area, game: &Match, puuid: &str) -> Drawn {
     Ok(())
 }
 
-/// Where the tracked player ranks in the lobby across four metrics.
-fn draw_ranking(area: &Area, game: &Match, puuid: &str) -> Drawn {
+/// Side-by-side comparison of the tracked player (green) vs their lane
+/// opponent (red) across four metrics, each normalized to the pair's max so
+/// the mixed units are comparable; real values are annotated on the bars.
+fn draw_matchup(area: &Area, game: &Match, puuid: &str) -> Drawn {
     let parts = &game.info.participants;
     let player = parts
         .iter()
         .find(|p| p.puuid == puuid)
         .ok_or_else(|| "player not found".to_string())?;
+    let opponent = parts
+        .iter()
+        .find(|p| p.team_id != player.team_id && p.team_position == player.team_position)
+        .or_else(|| parts.iter().find(|p| p.team_id != player.team_id))
+        .ok_or_else(|| "opponent not found".to_string())?;
 
-    let dmg = |p: &Participant| p.total_damage_dealt_to_champions as f64;
-    let gold = |p: &Participant| p.gold_earned as f64;
     let kda = |p: &Participant| (p.kills + p.assists) as f64 / p.deaths.max(1) as f64;
-    let vis = |p: &Participant| p.vision_score as f64;
-    let rank = |val: f64, f: &dyn Fn(&Participant) -> f64| -> i32 {
-        1 + parts.iter().filter(|p| f(p) > val).count() as i32
+    let fmt_k = |v: f64| {
+        if v >= 1000.0 {
+            format!("{:.1}k", v / 1000.0)
+        } else {
+            format!("{v:.0}")
+        }
     };
 
-    let metrics = [
-        ("Damage", rank(dmg(player), &dmg)),
-        ("Gold", rank(gold(player), &gold)),
-        ("KDA", rank(kda(player), &kda)),
-        ("Vision", rank(vis(player), &vis)),
+    // (name, player value, opponent value, player label, opponent label)
+    let metrics: [(&str, f64, f64, String, String); 4] = [
+        (
+            "Damage",
+            player.total_damage_dealt_to_champions as f64,
+            opponent.total_damage_dealt_to_champions as f64,
+            fmt_k(player.total_damage_dealt_to_champions as f64),
+            fmt_k(opponent.total_damage_dealt_to_champions as f64),
+        ),
+        (
+            "Gold",
+            player.gold_earned as f64,
+            opponent.gold_earned as f64,
+            fmt_k(player.gold_earned as f64),
+            fmt_k(opponent.gold_earned as f64),
+        ),
+        (
+            "KDA",
+            kda(player),
+            kda(opponent),
+            format!("{:.1}", kda(player)),
+            format!("{:.1}", kda(opponent)),
+        ),
+        (
+            "Vision",
+            player.vision_score as f64,
+            opponent.vision_score as f64,
+            format!("{}", player.vision_score),
+            format!("{}", opponent.vision_score),
+        ),
     ];
-    let total = parts.len() as i32;
     let n = metrics.len() as i32;
 
     let mut chart = ChartBuilder::on(area)
@@ -294,22 +347,17 @@ fn draw_ranking(area: &Area, game: &Match, puuid: &str) -> Drawn {
         .margin_left(px(0))
         .margin_right(px(0))
         .x_label_area_size(px(50))
-        .y_label_area_size(px(42))
-        // Tight numeric x-range: bars centered on 0..n-1 fill the width, and
-        // integer gridlines land on the bar centers (so labels center too).
-        // Extra vertical headroom keeps the #N callouts clear of the bars.
-        .build_cartesian_2d(-0.5f64..(n as f64 - 0.5), 0f64..(total as f64 + 0.8))?;
+        .y_label_area_size(px(10))
+        .build_cartesian_2d(-0.5f64..(n as f64 - 0.5), 0f64..1.28)?;
     let title_x = plot_center_x(area, &chart);
     chart
         .configure_mesh()
         .disable_x_mesh()
+        .disable_y_mesh()
         .label_style(caption(13))
         .axis_style(GRID)
-        .bold_line_style(GRID)
-        .light_line_style(BG)
         .x_labels(metrics.len())
-        .y_labels(total as usize)
-        .y_label_formatter(&|v| format!("{v:.0}"))
+        .y_labels(0)
         .x_label_formatter(&|x| {
             let idx = x.round();
             if (idx - x).abs() < 1e-6 && idx >= 0.0 {
@@ -319,19 +367,34 @@ fn draw_ranking(area: &Area, game: &Match, puuid: &str) -> Drawn {
             }
         })
         .draw()?;
-    let centered = caption(17).pos(Pos::new(HPos::Center, VPos::Bottom));
-    for (i, (_, r)) in metrics.iter().enumerate() {
-        let (x, beaten) = (i as f64, (total - r) as f64);
+
+    let value_style = caption(12).pos(Pos::new(HPos::Center, VPos::Bottom));
+    for (i, (_, pv, ov, plabel, olabel)) in metrics.iter().enumerate() {
+        let max = pv.max(*ov).max(1.0);
+        let (ph, oh) = (pv / max, ov / max);
+        let x = i as f64;
+        // player (green) on the left, opponent (red) on the right
         chart.draw_series(std::iter::once(Rectangle::new(
-            [(x - 0.4, 0f64), (x + 0.4, beaten)],
-            BLURPLE.filled(),
+            [(x - 0.36, 0.0), (x - 0.02, ph)],
+            GREEN.filled(),
+        )))?;
+        chart.draw_series(std::iter::once(Rectangle::new(
+            [(x + 0.02, 0.0), (x + 0.36, oh)],
+            ENEMY.filled(),
         )))?;
         chart.draw_series(std::iter::once(Text::new(
-            format!("#{r}"),
-            (x, beaten + 0.25),
-            centered.clone(),
+            plabel.clone(),
+            (x - 0.19, ph + 0.03),
+            value_style.clone(),
+        )))?;
+        chart.draw_series(std::iter::once(Text::new(
+            olabel.clone(),
+            (x + 0.19, oh + 0.03),
+            value_style.clone(),
         )))?;
     }
-    draw_title(area, "Lobby Ranking", 22, title_x)?;
+
+    let opp = spaced_name(&opponent.champion_name);
+    draw_title(area, &format!("You vs {opp}"), 20, title_x)?;
     Ok(())
 }
