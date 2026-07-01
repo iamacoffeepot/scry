@@ -52,7 +52,20 @@ impl Webhook {
     ) -> Result<()> {
         let base = self.url.split('?').next().unwrap_or(&self.url);
         let url = format!("{base}/messages/{message_id}?with_components=true");
-        let builder = self.attach(self.http.patch(&url), payload, attachments)?;
+        // On edit, Discord APPENDS uploaded files unless the payload's
+        // `attachments` array declares the full set. Reference each new file by
+        // its `files[i]` index so this edit replaces the message's attachments
+        // (otherwise repeated edits pile up to the 10-attachment cap).
+        let mut payload = payload.clone();
+        if let Some(obj) = payload.as_object_mut() {
+            let atts: Vec<Value> = attachments
+                .iter()
+                .enumerate()
+                .map(|(i, a)| json!({ "id": i, "filename": a.filename }))
+                .collect();
+            obj.insert("attachments".to_string(), Value::Array(atts));
+        }
+        let builder = self.attach(self.http.patch(&url), &payload, attachments)?;
         self.send_checked(builder, "editing Discord webhook message").await?;
         Ok(())
     }
@@ -243,12 +256,17 @@ fn header_section(s: &MatchSummary) -> Value {
     // Shown after the result in the title (emphasized) and on the rank line.
     let lp_delta = s.rank.as_ref().map(|r| match r.delta {
         Some(d) => format!("{d:+} LP"),
-        None => "(+?) LP".to_string(),
+        None => "+? LP".to_string(),
     });
-    let title_lp = lp_delta.as_ref().map(|d| format!(" · {d}")).unwrap_or_default();
+    let title_lp = lp_delta.as_ref().map(|d| format!(" ({d})")).unwrap_or_default();
+    // Timestamp the game's end (start + duration), so "x minutes ago" reads from
+    // when it finished — which is when the post goes out. Match length rides in
+    // the result line: "Victory in 25:19".
+    let ended_at = s.started_at_secs + s.duration_secs;
+    let dur = format!("{}m {:02}s", s.duration_secs / 60, s.duration_secs % 60);
     let mut content = format!(
-        "-# <t:{}:F> · <t:{}:R>\n### [{}]({}) — {result}{title_lp}\n{} · {queue}{} side",
-        s.started_at_secs, s.started_at_secs, s.player, s.profile_url, s.champion, s.side
+        "-# <t:{ended_at}:F> · <t:{ended_at}:R>\n### [{}]({}) — {result} in {dur}{title_lp}\n{} · {queue}{} side",
+        s.player, s.profile_url, s.champion, s.side
     );
     if let Some(r) = &s.rank {
         let below = lp_delta.as_deref().map(|d| format!(" · {d}")).unwrap_or_default();
@@ -263,11 +281,9 @@ fn header_section(s: &MatchSummary) -> Value {
 
 /// The stat grid rendered as text (Components V2 has no native field grid).
 fn stats_text(s: &MatchSummary) -> String {
-    let mins = s.duration_secs / 60;
-    let secs = s.duration_secs % 60;
     format!(
         "**KDA** {}/{}/{} ({:.2})  •  **CS** {} ({:.1}/min)  •  **Damage** {}\n\
-         **Gold** {}  •  **Duration** {mins}:{secs:02}  •  **Vision** {} ({:.2}/min)\n\
+         **Gold** {}  •  **Vision** {} ({:.2}/min)\n\
          **Wards** {} placed • {} killed • {} control",
         s.kills,
         s.deaths,
