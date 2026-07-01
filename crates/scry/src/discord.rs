@@ -26,41 +26,78 @@ impl Webhook {
     }
 
     /// Post a prebuilt message payload (and any attachments) as one webhook
-    /// message. With attachments the request is multipart (`payload_json` +
-    /// `files[i]`).
-    pub async fn post(&self, payload: &Value, attachments: &[Attachment]) -> Result<()> {
-        // Incoming webhooks only process Components V2 when this is set.
+    /// message, returning the created message's id (needed to edit it later).
+    /// With attachments the request is multipart (`payload_json` + `files[i]`).
+    pub async fn post(&self, payload: &Value, attachments: &[Attachment]) -> Result<Option<String>> {
+        // Incoming webhooks only process Components V2 with this flag; `wait`
+        // makes Discord return the created message (so we can read its id).
         let sep = if self.url.contains('?') { '&' } else { '?' };
-        let url = format!("{}{sep}with_components=true", self.url);
-        let builder = if attachments.is_empty() {
-            self.http.post(&url).json(payload)
-        } else {
-            let mut form = reqwest::multipart::Form::new().text(
-                "payload_json",
-                serde_json::to_string(payload).context("serializing webhook payload")?,
-            );
-            for (i, a) in attachments.iter().enumerate() {
-                let mime = match a.filename.rsplit('.').next() {
-                    Some("mp4") => "video/mp4",
-                    Some("webm") => "video/webm",
-                    _ => "image/png",
-                };
-                let part = reqwest::multipart::Part::bytes(a.bytes.clone())
-                    .file_name(a.filename.clone())
-                    .mime_str(mime)
-                    .context("building attachment part")?;
-                form = form.part(format!("files[{i}]"), part);
-            }
-            self.http.post(&url).multipart(form)
-        };
+        let url = format!("{}{sep}with_components=true&wait=true", self.url);
+        let builder = self.attach(self.http.post(&url), payload, attachments)?;
+        let resp = self.send_checked(builder, "posting to Discord webhook").await?;
+        let body = resp.text().await.unwrap_or_default();
+        Ok(serde_json::from_str::<Value>(&body)
+            .ok()
+            .and_then(|v| v.get("id").and_then(Value::as_str).map(str::to_string)))
+    }
 
-        let resp = builder.send().await.context("posting to Discord webhook")?;
+    /// Edit a previously-posted webhook message in place (used to attach the
+    /// clips once recorded). Attachments sent here fully replace the message's
+    /// files, so the caller must include every attachment it wants to keep.
+    pub async fn edit(
+        &self,
+        message_id: &str,
+        payload: &Value,
+        attachments: &[Attachment],
+    ) -> Result<()> {
+        let base = self.url.split('?').next().unwrap_or(&self.url);
+        let url = format!("{base}/messages/{message_id}?with_components=true");
+        let builder = self.attach(self.http.patch(&url), payload, attachments)?;
+        self.send_checked(builder, "editing Discord webhook message").await?;
+        Ok(())
+    }
+
+    /// Attach the payload to a request as JSON, or multipart when there are files.
+    fn attach(
+        &self,
+        builder: reqwest::RequestBuilder,
+        payload: &Value,
+        attachments: &[Attachment],
+    ) -> Result<reqwest::RequestBuilder> {
+        if attachments.is_empty() {
+            return Ok(builder.json(payload));
+        }
+        let mut form = reqwest::multipart::Form::new().text(
+            "payload_json",
+            serde_json::to_string(payload).context("serializing webhook payload")?,
+        );
+        for (i, a) in attachments.iter().enumerate() {
+            let mime = match a.filename.rsplit('.').next() {
+                Some("mp4") => "video/mp4",
+                Some("webm") => "video/webm",
+                _ => "image/png",
+            };
+            let part = reqwest::multipart::Part::bytes(a.bytes.clone())
+                .file_name(a.filename.clone())
+                .mime_str(mime)
+                .context("building attachment part")?;
+            form = form.part(format!("files[{i}]"), part);
+        }
+        Ok(builder.multipart(form))
+    }
+
+    async fn send_checked(
+        &self,
+        builder: reqwest::RequestBuilder,
+        what: &'static str,
+    ) -> Result<reqwest::Response> {
+        let resp = builder.send().await.context(what)?;
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
             bail!("Discord webhook returned {status}: {body}");
         }
-        Ok(())
+        Ok(resp)
     }
 }
 

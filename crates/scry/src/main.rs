@@ -92,7 +92,7 @@ async fn run(cli: Cli) -> Result<()> {
         };
         webhook
             .post(&discord::stats_message(&match_summary, None, None, None), &[])
-            .await?;
+            .await?; // live posting doesn't track the message id
         tracing::info!(%match_id, "posted summary");
     }
 
@@ -191,8 +191,15 @@ async fn post_from_archive(cli: &Cli, dir: &Path) -> Result<()> {
     let mut match_summary = stats::summarize(&game, &puuid, &ctx)
         .ok_or_else(|| anyhow!("could not summarize {} from {}", cli.riot_id, dir.display()))?;
 
-    // LP tracking: fetch current rank and diff against the last snapshot.
-    if cli.track_lp
+    // LP tracking. On an --edit we must NOT re-fetch or re-diff: the snapshot
+    // was already advanced at post time, so a second diff would read zero. Reuse
+    // the rank/LP computed then, persisted in <dir>/.rank.json.
+    let rank_path = dir.join(".rank.json");
+    if cli.edit {
+        if let Ok(json) = fs::read_to_string(&rank_path) {
+            match_summary.rank = serde_json::from_str(&json).ok();
+        }
+    } else if cli.track_lp
         && let Some(queue) = rank::queue_type(game.info.queue_id)
     {
         let region = game.info.platform_id.to_lowercase();
@@ -206,11 +213,16 @@ async fn post_from_archive(cli: &Cli, dir: &Path) -> Result<()> {
                 if let Err(e) = rank::write_snapshot(&snap, &current) {
                     tracing::warn!(error = %e, "writing LP snapshot failed");
                 }
-                match_summary.rank = Some(stats::RankInfo {
+                let info = stats::RankInfo {
                     label: current.label(),
                     lp: current.lp,
                     delta,
-                });
+                };
+                // Persist so a later --edit renders the identical LP line.
+                if let Ok(json) = serde_json::to_string(&info) {
+                    let _ = fs::write(&rank_path, json);
+                }
+                match_summary.rank = Some(info);
             }
             Ok(None) => tracing::info!("player is unranked in this queue; no LP line"),
             Err(e) => tracing::warn!(error = %e, "rank fetch failed; skipping LP line"),
@@ -272,9 +284,23 @@ async fn post_from_archive(cli: &Cli, dir: &Path) -> Result<()> {
         discord::stats_message(&match_summary, chart, highlight, lowlight)
     };
 
-    discord::Webhook::new(cli.webhook.clone())
-        .post(&message, &attachments)
-        .await?;
-    tracing::info!(dir = %dir.display(), "posted package from archive");
+    let webhook = discord::Webhook::new(cli.webhook.clone());
+    let mid_path = dir.join(".message-id");
+    if cli.edit {
+        // Attach the clips to the message we already posted for this archive.
+        let message_id = fs::read_to_string(&mid_path)
+            .with_context(|| format!("reading {} (was this archive posted?)", mid_path.display()))?;
+        webhook.edit(message_id.trim(), &message, &attachments).await?;
+        tracing::info!(dir = %dir.display(), "edited posted message with clips");
+    } else {
+        // Initial post: record the message id so the clip pass can edit it.
+        if let Some(id) = webhook.post(&message, &attachments).await? {
+            fs::write(&mid_path, &id)
+                .with_context(|| format!("writing {}", mid_path.display()))?;
+        } else {
+            tracing::warn!("webhook did not return a message id; clips can't be attached later");
+        }
+        tracing::info!(dir = %dir.display(), "posted package from archive");
+    }
     Ok(())
 }

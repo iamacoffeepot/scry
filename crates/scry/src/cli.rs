@@ -71,4 +71,11 @@ pub struct Cli {
     /// directory and print the classified moments. Uses no Riot API.
     #[arg(long)]
     pub analyze: Option<PathBuf>,
+
+    /// With --from-archive: edit the message already posted for this archive
+    /// (id read from <dir>/.message-id) instead of posting a new one — used to
+    /// attach the Highlight/Lowlight clips once they've been recorded. Reuses
+    /// the post-time rank/LP from <dir>/.rank.json (no Riot API call).
+    #[arg(long)]
+    pub edit: bool,
 }

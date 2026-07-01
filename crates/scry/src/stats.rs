@@ -1,4 +1,5 @@
 use riven::models::match_v5::Match;
+use serde::{Deserialize, Serialize};
 
 /// Per-render context: the things the embed needs that aren't in the match data
 /// (which web region to link, and a display-name fallback if Riot omits it).
@@ -35,6 +36,7 @@ pub struct MatchSummary {
 }
 
 /// Ranked standing to show in the header, with the LP change since last game.
+#[derive(Serialize, Deserialize)]
 pub struct RankInfo {
     /// e.g. "Gold II" or "Master".
     pub label: String,
