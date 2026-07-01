@@ -15,7 +15,10 @@ and how the two combined into the result.
 ## League of Legends fundamentals (use this to interpret the numbers)
 
 Summoner's Rift, 5v5. Each team destroys towers and objectives to reach and
-break the enemy Nexus. Understanding *why* the numbers matter:
+break the enemy Nexus. The two teams are **Blue side** (`teamId` 100) and **Red
+side** (`teamId` 200) — always name them "Blue side" / "Red side" in the output,
+never the raw `teamId` number (never write "team 100" or "team 200").
+Understanding *why* the numbers matter:
 
 **Roles / positions** (`teamPosition`): `TOP` (island duelist/tank), `JUNGLE`
 (roams the map, takes neutral objectives, ganks lanes), `MIDDLE` (central
@@ -119,7 +122,8 @@ Output **only** the sections below, in this order, and nothing else — no
 preamble ("Here is the analysis"), no closing remarks, no extra headings, no
 code fences around the output. Use only Discord-compatible Markdown: `**bold**`,
 `*italic*`, and `-` bullet lists. No tables, no HTML, no `#`/`###` headings.
-Reference champions by name. Write timestamps as `m:ss`.
+Reference champions by name and teams as "Blue side" / "Red side" (never the raw
+`teamId`). Write timestamps as `m:ss`.
 
 ```
 ## Verdict
