@@ -91,7 +91,7 @@ async fn run(cli: Cli) -> Result<()> {
             continue;
         };
         webhook
-            .post(&discord::stats_message(&match_summary, None), &[])
+            .post(&discord::stats_message(&match_summary, None, None), &[])
             .await?;
         tracing::info!(%match_id, "posted summary");
     }
@@ -264,7 +264,7 @@ async fn post_from_archive(cli: &Cli, dir: &Path) -> Result<()> {
             highlight,
         )
     } else {
-        discord::stats_message(&match_summary, chart)
+        discord::stats_message(&match_summary, chart, highlight)
     };
 
     discord::Webhook::new(cli.webhook.clone())

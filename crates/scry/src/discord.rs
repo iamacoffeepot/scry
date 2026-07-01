@@ -83,10 +83,14 @@ fn result_color(win: bool) -> u32 {
 }
 
 /// The stats-only message (live posting and the no-overview archive case).
-pub fn stats_message(s: &MatchSummary, chart: Option<&str>) -> Value {
+pub fn stats_message(s: &MatchSummary, chart: Option<&str>, highlight: Option<&str>) -> Value {
     let mut body = vec![header_section(s), text(stats_text(s))];
     if let Some(name) = chart {
         body.push(media(name));
+    }
+    if let Some(clip) = highlight {
+        body.push(json!({ "type": SEPARATOR, "divider": true, "spacing": 2 }));
+        body.push(media(clip));
     }
     body.push(footer(None));
     container_message(s.win, body)
@@ -114,7 +118,6 @@ pub fn combined_message(
     }
     if let Some(clip) = highlight {
         body.push(json!({ "type": SEPARATOR, "divider": true, "spacing": 2 }));
-        body.push(text("### 🎬 Play of the Game"));
         body.push(media(clip));
     }
     body.push(footer(Some(model)));
