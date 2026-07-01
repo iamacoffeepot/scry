@@ -104,10 +104,24 @@ impl Client {
     }
 
     /// Most-recent match IDs for a PUUID, newest first.
-    pub async fn recent_match_ids(&self, puuid: &str, count: i32) -> Result<Vec<String>> {
+    pub async fn recent_match_ids(
+        &self,
+        puuid: &str,
+        count: i32,
+        queue: Option<u16>,
+    ) -> Result<Vec<String>> {
         self.api
             .match_v5()
-            .get_match_ids_by_puuid(self.regional, puuid, Some(count), None, None, None, None, None)
+            .get_match_ids_by_puuid(
+                self.regional,
+                puuid,
+                Some(count),
+                None,
+                queue.map(riven::consts::Queue),
+                None,
+                None,
+                None,
+            )
             .await
             .context("match-v5 match-id list request failed")
     }

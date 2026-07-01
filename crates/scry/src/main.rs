@@ -21,6 +21,8 @@ use crate::cli::Cli;
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        // Logs to stderr so stdout carries only data (e.g. the archive path).
+        .with_writer(std::io::stderr)
         .init();
 
     run(Cli::parse()).await
@@ -48,7 +50,7 @@ async fn run(cli: Cli) -> Result<()> {
         .await
         .with_context(|| format!("resolving Riot ID {}", cli.riot_id))?;
 
-    let match_ids = client.recent_match_ids(&puuid, cli.count).await?;
+    let match_ids = client.recent_match_ids(&puuid, cli.count, cli.queue).await?;
     if match_ids.is_empty() {
         tracing::warn!("no recent matches found for {}", cli.riot_id);
         return Ok(());
@@ -61,6 +63,8 @@ async fn run(cli: Cli) -> Result<()> {
             let timeline = client.raw_timeline_json(&match_id).await?;
             let out = archive::write(dump_dir, &match_id, &match_json, &timeline)?;
             tracing::info!(%match_id, path = %out.display(), "archived match data");
+            // Emit the archive path on stdout so a poller can consume it.
+            println!("{}", out.display());
         }
         return Ok(());
     }

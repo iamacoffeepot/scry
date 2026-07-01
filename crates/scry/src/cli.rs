@@ -28,6 +28,11 @@ pub struct Cli {
     #[arg(long, default_value_t = 1)]
     pub count: i32,
 
+    /// Only pull games from this queue id (e.g. 420 ranked solo, 440 ranked
+    /// flex, 400 normal draft, 430 normal blind, 450 ARAM). Omit for all queues.
+    #[arg(long, env = "SCRY_QUEUE")]
+    pub queue: Option<u16>,
+
     /// Instead of posting, archive each match's raw data (match.json +
     /// timeline JSONL) under <dir>/<platform>/<id>/ for offline analysis.
     #[arg(long)]
