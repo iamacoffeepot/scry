@@ -3,7 +3,7 @@
 # scry poller — watch a list of accounts and post each newly-completed game.
 #
 # For each account it dumps the latest game (filtered by queue), and if that
-# game hasn't been posted yet (no `.posted` marker in its archive dir) runs the
+# game hasn't been posted for that player yet (no `.posted-<player>` marker) runs the
 # full pipeline: analyze -> claude -p overview -> post. The archive directory is
 # the dedup state; there is no separate database.
 #
@@ -40,6 +40,10 @@ log() { echo "[$(date +%H:%M:%S)] $*" >&2; }
 # process_account <riot_id> <region> <queue>
 process_account() {
   local rid="$1" region="$2" queue="$3"
+  # Per-account dedup marker: a game shared by two tracked players is posted
+  # once per player (each gets their own centered overview).
+  local slug
+  slug="$(printf '%s' "$rid" | tr -c 'A-Za-z0-9' '_')"
 
   local queue_args=()
   [[ "$queue" != "all" ]] && queue_args=(--queue "$queue")
@@ -51,8 +55,9 @@ process_account() {
     log "no game for $rid (queue $queue)"
     return
   fi
-  if [[ -f "$dir/.posted" ]]; then
-    return  # already handled
+  local marker="$dir/.posted-$slug"
+  if [[ -f "$marker" ]]; then
+    return  # already handled for this player
   fi
   log "new game for $rid -> $dir"
 
@@ -72,7 +77,7 @@ process_account() {
   # Post the package; only mark posted on success.
   if $scry --from-archive "$dir" --riot-id "$rid" \
       --summary "$dir/overview.md" --summary-model "$model" --charts; then
-    touch "$dir/.posted"
+    touch "$marker"
     log "posted $rid"
   else
     log "post failed for $rid"
