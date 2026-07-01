@@ -123,6 +123,26 @@ impl Client {
     }
 }
 
+/// OP.GG / League of Graphs region slug from a Riot `platformId` (e.g. "NA1").
+/// Used by the archive-post path, which has the platform string rather than a
+/// typed `PlatformRoute`.
+pub fn web_region_slug(platform_id: &str) -> &'static str {
+    match platform_id.to_ascii_uppercase().as_str() {
+        "NA1" => "na",
+        "EUW1" => "euw",
+        "EUN1" => "eune",
+        "KR" => "kr",
+        "BR1" => "br",
+        "JP1" => "jp",
+        "LA1" => "lan",
+        "LA2" => "las",
+        "OC1" => "oce",
+        "TR1" => "tr",
+        "RU" => "ru",
+        _ => "na",
+    }
+}
+
 /// Map a platform code to a riven `PlatformRoute`. Covers the main live regions.
 fn parse_platform(region: &str) -> Result<PlatformRoute> {
     Ok(match region.to_ascii_lowercase().as_str() {

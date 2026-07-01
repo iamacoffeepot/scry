@@ -10,9 +10,11 @@ pub struct Cli {
     #[arg(long)]
     pub riot_id: String,
 
-    /// Platform/region code, e.g. na1, euw1, eun1, kr, br1.
+    /// Platform/region code, e.g. na1, euw1, eun1, kr, br1. Required unless
+    /// posting from an archive (--from-archive), which reads the platform from
+    /// the match record.
     #[arg(long)]
-    pub region: String,
+    pub region: Option<String>,
 
     /// Discord incoming-webhook URL.
     #[arg(long, env = "SCRY_DISCORD_WEBHOOK")]
@@ -30,4 +32,19 @@ pub struct Cli {
     /// timeline JSONL) under <dir>/<platform>/<id>/ for offline analysis.
     #[arg(long)]
     pub dump: Option<PathBuf>,
+
+    /// Pair the posted match with a coach summary (Markdown from the COACH
+    /// prompt): its ## sections become a second embed posted alongside the
+    /// stats embed.
+    #[arg(long)]
+    pub summary: Option<PathBuf>,
+
+    /// Model label shown in the coach summary's footer (attribution).
+    #[arg(long, default_value = "Claude Opus")]
+    pub summary_model: String,
+
+    /// Post a packaged stats + coach embed from a dumped match directory
+    /// (containing match.json), using no Riot API. Pair with --summary.
+    #[arg(long)]
+    pub from_archive: Option<PathBuf>,
 }

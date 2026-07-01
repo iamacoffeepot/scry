@@ -3,9 +3,14 @@ mod cli;
 mod discord;
 mod riot;
 mod stats;
+mod summary;
 
-use anyhow::{Context, Result};
+use std::fs;
+use std::path::Path;
+
+use anyhow::{Context, Result, anyhow};
 use clap::Parser;
+use riven::models::match_v5::Match;
 use tracing_subscriber::EnvFilter;
 
 use crate::cli::Cli;
@@ -20,7 +25,16 @@ async fn main() -> Result<()> {
 }
 
 async fn run(cli: Cli) -> Result<()> {
-    let client = riot::Client::new(&cli.api_key, &cli.region)?;
+    // Post a packaged embed from a dumped match record — no Riot API calls.
+    if let Some(dir) = cli.from_archive.as_deref() {
+        return post_from_archive(&cli, dir).await;
+    }
+
+    let region = cli
+        .region
+        .as_deref()
+        .context("--region is required (except with --from-archive)")?;
+    let client = riot::Client::new(&cli.api_key, region)?;
 
     let puuid = client
         .resolve_puuid(&cli.riot_id)
@@ -55,18 +69,62 @@ async fn run(cli: Cli) -> Result<()> {
         fallback_tag,
     };
 
-    let webhook = discord::Webhook::new(cli.webhook);
+    let webhook = discord::Webhook::new(cli.webhook.clone());
 
     // Oldest -> newest so the channel reads chronologically.
     for match_id in match_ids.into_iter().rev() {
         let game = client.match_detail(&match_id).await?;
-        let Some(summary) = stats::summarize(&game, &puuid, &ctx) else {
+        let Some(match_summary) = stats::summarize(&game, &puuid, &ctx) else {
             tracing::warn!(%match_id, "player not found in match participants; skipping");
             continue;
         };
-        webhook.post(&summary).await?;
+        webhook.post(&[discord::stats_embed(&match_summary)]).await?;
         tracing::info!(%match_id, "posted summary");
     }
 
+    Ok(())
+}
+
+/// Build and post the stats + coach package from a dumped match directory,
+/// using only the archived `match.json` (and an optional `--summary` file).
+async fn post_from_archive(cli: &Cli, dir: &Path) -> Result<()> {
+    let raw = fs::read_to_string(dir.join("match.json"))
+        .with_context(|| format!("reading {}", dir.join("match.json").display()))?;
+    let game: Match = serde_json::from_str(&raw).context("parsing match.json into match-v5")?;
+
+    let (name, tag) = cli
+        .riot_id
+        .split_once('#')
+        .unwrap_or((cli.riot_id.as_str(), ""));
+    let player = game
+        .info
+        .participants
+        .iter()
+        .find(|p| {
+            p.riot_id_game_name.as_deref() == Some(name)
+                && p.riot_id_tagline.as_deref() == Some(tag)
+        })
+        .ok_or_else(|| anyhow!("player {} not found in {}", cli.riot_id, dir.display()))?;
+    let puuid = player.puuid.clone();
+
+    let ctx = stats::RenderContext {
+        region_slug: riot::web_region_slug(&game.info.platform_id),
+        fallback_name: name,
+        fallback_tag: tag,
+    };
+    let match_summary = stats::summarize(&game, &puuid, &ctx)
+        .ok_or_else(|| anyhow!("could not summarize {} from {}", cli.riot_id, dir.display()))?;
+
+    let mut embeds = vec![discord::stats_embed(&match_summary)];
+    if let Some(summary_path) = cli.summary.as_deref() {
+        let md = fs::read_to_string(summary_path)
+            .with_context(|| format!("reading summary {}", summary_path.display()))?;
+        embeds.push(discord::coach_embed(&summary::parse(&md), &cli.summary_model));
+    }
+
+    discord::Webhook::new(cli.webhook.clone())
+        .post(&embeds)
+        .await?;
+    tracing::info!(dir = %dir.display(), "posted package from archive");
     Ok(())
 }
