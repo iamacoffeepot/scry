@@ -35,17 +35,19 @@ const ENEMY: RGBColor = RGBColor(237, 66, 69); // #ED4245 red (enemy team)
 type Area<'a> = DrawingArea<BitMapBackend<'a>, Shift>;
 type Drawn = std::result::Result<(), Box<dyn Error>>;
 
-// Share Tech Mono (SIL OFL 1.1) — embedded so rendering is host-independent.
-// License at crates/scry/assets/fonts/OFL.txt.
+// Inter (SIL OFL 1.1) — a clean humanist sans close to Discord's gg sans,
+// embedded so rendering is host-independent. License at
+// crates/scry/assets/fonts/Inter-OFL.txt.
 const FONT: &str = "sans-serif";
-const FONT_MAIN: &[u8] = include_bytes!("../assets/fonts/ShareTechMono-Regular.ttf");
+const FONT_MAIN: &[u8] = include_bytes!("../assets/fonts/Inter-Regular.ttf");
+const FONT_BOLD: &[u8] = include_bytes!("../assets/fonts/Inter-Bold.ttf");
 static FONTS: Once = Once::new();
 
 /// Register the embedded font (as both Normal and Bold) with plotters.
 fn init_fonts() {
     FONTS.call_once(|| {
         let n = register_font(FONT, FontStyle::Normal, FONT_MAIN).is_ok();
-        let b = register_font(FONT, FontStyle::Bold, FONT_MAIN).is_ok();
+        let b = register_font(FONT, FontStyle::Bold, FONT_BOLD).is_ok();
         if !(n && b) {
             eprintln!("scry: embedded font failed to register");
         }
