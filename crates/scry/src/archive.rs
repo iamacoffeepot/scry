@@ -65,6 +65,7 @@ fn slim_frame(pf: &Value) -> Value {
     json!({
         "participantId": pf.get("participantId"),
         "totalGold": pf.get("totalGold"),
+        "currentGold": pf.get("currentGold"),
         "xp": pf.get("xp"),
         "level": pf.get("level"),
         "minionsKilled": pf.get("minionsKilled"),
