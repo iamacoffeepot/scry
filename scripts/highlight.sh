@@ -15,6 +15,8 @@ set -uo pipefail
 
 dir="${1:?usage: highlight.sh <archivedir> <RiotID#Tag>}"
 rid="${2:?usage: highlight.sh <archivedir> <RiotID#Tag>}"
+# The game resolves the record `path` from ITS own cwd, so it must be absolute.
+dir="$(cd "$dir" && pwd)"
 name="${rid%%#*}"; tag="${rid##*#}"
 gid="$(basename "$dir")"   # numeric game id (e.g. 5592737881)
 
@@ -48,13 +50,11 @@ kill_s=$(( kill_ms / 1000 ))
 seek_s=$(( kill_s - 10 ))   # play from here so it buffers
 echo "highlight kill at ${kill_s}s (game time); ~7s lead-in"
 
-# --- ensure the replay is loaded --------------------------------------------
-if [[ "$(curl -sk --max-time 3 -o /dev/null -w '%{http_code}' "$rp/playback" 2>/dev/null)" != "200" ]]; then
-  pkill -9 -f "LoL/Game/League" 2>/dev/null; sleep 4
-  curl -sk --max-time 8 -u "riot:$pass" -X POST "$lcu/lol-replays/v1/rofls/$gid/download/graceful" -H "Content-Type: application/json" -d '{}' >/dev/null
-  curl -sk --max-time 8 -u "riot:$pass" -X POST "$lcu/lol-replays/v1/rofls/$gid/watch" -H "Content-Type: application/json" -d '{}' >/dev/null
-  for _ in $(seq 1 30); do [[ "$(curl -sk --max-time 3 -o /dev/null -w '%{http_code}' "$rp/playback" 2>/dev/null)" == "200" ]] && break; sleep 3; done
-fi
+# --- always (re)load THIS game's replay (a stale one may be up) --------------
+pkill -9 -f "LoL/Game/League" 2>/dev/null; sleep 4
+curl -sk --max-time 10 -u "riot:$pass" -X POST "$lcu/lol-replays/v1/rofls/$gid/download/graceful" -H "Content-Type: application/json" -d '{}' >/dev/null
+curl -sk --max-time 10 -u "riot:$pass" -X POST "$lcu/lol-replays/v1/rofls/$gid/watch" -H "Content-Type: application/json" -d '{}' >/dev/null
+for _ in $(seq 1 30); do [[ "$(curl -sk --max-time 3 -o /dev/null -w '%{http_code}' "$rp/playback" 2>/dev/null)" == "200" ]] && break; sleep 3; done
 [[ "$(curl -sk --max-time 3 -o /dev/null -w '%{http_code}' "$rp/playback" 2>/dev/null)" == "200" ]] || { echo "replay API never came up"; exit 1; }
 
 # --- clean shot: HUD off, full vision ---------------------------------------
