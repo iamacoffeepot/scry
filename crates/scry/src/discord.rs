@@ -102,6 +102,8 @@ pub fn combined_message(
         text(overview_text(summary)),
     ];
     if let Some(name) = chart {
+        // Divider between the overview and the chart.
+        body.push(json!({ "type": SEPARATOR, "divider": true, "spacing": 2 }));
         body.push(media(name));
     }
     body.push(footer(Some(model)));
@@ -142,16 +144,20 @@ fn header_section(s: &MatchSummary) -> Value {
     } else {
         format!("{} · ", s.queue)
     };
+    // LP delta (ranked games only): "+18 LP" / "-15 LP", or "+?" if no baseline.
+    // Shown after the result in the title (emphasized) and on the rank line.
+    let lp_delta = s.rank.as_ref().map(|r| match r.delta {
+        Some(d) => format!("{d:+} LP"),
+        None => "(+?) LP".to_string(),
+    });
+    let title_lp = lp_delta.as_ref().map(|d| format!(" · {d}")).unwrap_or_default();
     let mut content = format!(
-        "-# <t:{}:F> · <t:{}:R>\n### [{}]({}) — {result}\n{} · {queue}{} side",
+        "-# <t:{}:F> · <t:{}:R>\n### [{}]({}) — {result}{title_lp}\n{} · {queue}{} side",
         s.started_at_secs, s.started_at_secs, s.player, s.profile_url, s.champion, s.side
     );
     if let Some(r) = &s.rank {
-        let delta = match r.delta {
-            Some(d) => format!(" · {d:+} LP"),
-            None => String::new(),
-        };
-        content.push_str(&format!("\n**{}** · {} LP{delta}", r.label, r.lp));
+        let below = lp_delta.as_deref().map(|d| format!(" · {d}")).unwrap_or_default();
+        content.push_str(&format!("\n**{}** · {} LP{below}", r.label, r.lp));
     }
     json!({
         "type": SECTION,
