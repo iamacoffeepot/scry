@@ -44,6 +44,20 @@ fn caption(size: u32) -> TextStyle<'static> {
     ("sans-serif", (size * SS) as i32).into_font().color(&FG)
 }
 
+/// Top strip (logical px) reserved in each panel for a manually-drawn title.
+const TITLE_STRIP: u32 = 44;
+
+/// Draw a panel title centered over the plot region. plotters' `.caption()`
+/// centers over the whole panel, which reads as left-shifted once the y-label
+/// area pushes the plot right; centering over `[y_label, w]` fixes that.
+fn draw_title(area: &Area, title: &str, size: u32, y_label: u32) -> Drawn {
+    let (w, _) = area.dim_in_pixel();
+    let center_x = ((y_label + w) / 2) as i32;
+    let style = caption(size).pos(Pos::new(HPos::Center, VPos::Top));
+    area.draw(&Text::new(title.to_string(), (center_x, px(10) as i32), style))?;
+    Ok(())
+}
+
 /// Render the composite dashboard to `out` as one anti-aliased PNG.
 pub fn dashboard(game: &Match, frames_jsonl: &str, puuid: &str, out: &Path) -> Result<()> {
     let (w, h) = (WIDTH * SS, HEIGHT * SS);
@@ -107,8 +121,8 @@ fn draw_gold(area: &Area, game: &Match, frames_jsonl: &str, puuid: &str) -> Draw
     let max_abs = pts.iter().map(|p| p.1.abs()).fold(1500.0_f64, f64::max);
 
     let mut chart = ChartBuilder::on(area)
-        .caption("Gold Lead", caption(24))
         .margin(px(22))
+        .margin_top(px(TITLE_STRIP))
         .x_label_area_size(px(50))
         .y_label_area_size(px(92))
         .build_cartesian_2d(0f64..max_min, -max_abs..max_abs)?;
@@ -131,6 +145,7 @@ fn draw_gold(area: &Area, game: &Match, frames_jsonl: &str, puuid: &str) -> Draw
         pts,
         ShapeStyle::from(GREEN).stroke_width(px(3)),
     ))?;
+    draw_title(area, "Gold Lead", 24, px(92))?;
     Ok(())
 }
 
@@ -163,8 +178,8 @@ fn draw_damage(area: &Area, game: &Match, puuid: &str) -> Drawn {
     let max_dmg = rows.iter().map(|r| r.1).max().unwrap_or(1).max(1) as f64;
 
     let mut chart = ChartBuilder::on(area)
-        .caption("Damage to Champions", caption(22))
         .margin(px(20))
+        .margin_top(px(TITLE_STRIP))
         .x_label_area_size(px(50))
         .y_label_area_size(px(116))
         .build_cartesian_2d(0f64..(max_dmg * 1.14), (0..n).into_segmented())?;
@@ -207,6 +222,7 @@ fn draw_damage(area: &Area, game: &Match, puuid: &str) -> Drawn {
             ShapeStyle::from(BG).stroke_width(px(3)),
         )))?;
     }
+    draw_title(area, "Damage to Champions", 22, px(116))?;
     Ok(())
 }
 
@@ -236,8 +252,8 @@ fn draw_ranking(area: &Area, game: &Match, puuid: &str) -> Drawn {
     let n = metrics.len() as i32;
 
     let mut chart = ChartBuilder::on(area)
-        .caption("Lobby Ranking", caption(22))
         .margin(px(20))
+        .margin_top(px(TITLE_STRIP))
         .x_label_area_size(px(50))
         .y_label_area_size(px(70))
         // Tight numeric x-range: bars centered on 0..n-1 fill the width, and
@@ -277,5 +293,6 @@ fn draw_ranking(area: &Area, game: &Match, puuid: &str) -> Drawn {
             centered.clone(),
         )))?;
     }
+    draw_title(area, "Lobby Ranking", 22, px(70))?;
     Ok(())
 }
