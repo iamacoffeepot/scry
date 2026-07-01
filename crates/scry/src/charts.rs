@@ -8,7 +8,7 @@ use std::error::Error;
 use std::path::Path;
 
 use anyhow::{Result, anyhow};
-use plotters::coord::Shift;
+use plotters::coord::{CoordTranslate, Shift};
 use plotters::prelude::*;
 use plotters::style::text_anchor::{HPos, Pos, VPos};
 use riven::consts::Team;
@@ -47,15 +47,21 @@ fn caption(size: u32) -> TextStyle<'static> {
 /// Top strip (logical px) reserved in each panel for a manually-drawn title.
 const TITLE_STRIP: u32 = 44;
 
-/// Draw a panel title centered over the plot region. plotters' `.caption()`
-/// centers over the whole panel, which reads as left-shifted once the y-label
-/// area pushes the plot right; centering over `[y_label, w]` fixes that.
-fn draw_title(area: &Area, title: &str, size: u32, y_label: u32) -> Drawn {
-    let (w, _) = area.dim_in_pixel();
-    let center_x = ((y_label + w) / 2) as i32;
+/// Draw a panel title horizontally centered at `center_x` (a local pixel x).
+fn draw_title(area: &Area, title: &str, size: u32, center_x: i32) -> Drawn {
     let style = caption(size).pos(Pos::new(HPos::Center, VPos::Top));
     area.draw(&Text::new(title.to_string(), (center_x, px(10) as i32), style))?;
     Ok(())
+}
+
+/// Horizontal center of the chart's plot region, in the panel's local pixels.
+fn plot_center_x<DB: DrawingBackend, CT: CoordTranslate>(
+    area: &DrawingArea<DB, Shift>,
+    chart: &ChartContext<DB, CT>,
+) -> i32 {
+    let (area_x, _) = area.get_pixel_range();
+    let (plot_x, _) = chart.plotting_area().get_pixel_range();
+    (plot_x.start + plot_x.end) / 2 - area_x.start
 }
 
 /// Render the composite dashboard to `out` as one anti-aliased PNG.
@@ -124,17 +130,16 @@ fn draw_gold(area: &Area, game: &Match, frames_jsonl: &str, puuid: &str) -> Draw
         .margin(px(22))
         .margin_top(px(TITLE_STRIP))
         .x_label_area_size(px(50))
-        .y_label_area_size(px(92))
+        .y_label_area_size(px(58))
         .build_cartesian_2d(0f64..max_min, -max_abs..max_abs)?;
+    let title_x = plot_center_x(area, &chart);
     chart
         .configure_mesh()
         .label_style(caption(13))
         .axis_style(GRID)
         .bold_line_style(GRID)
         .light_line_style(BG)
-        .axis_desc_style(caption(14))
-        .x_desc("Minute")
-        .y_desc("Gold lead")
+        .x_label_formatter(&|v| format!("{v:.0}"))
         .y_label_formatter(&|v| format!("{:+.0}k", v / 1000.0))
         .draw()?;
     chart.draw_series(LineSeries::new(
@@ -145,7 +150,7 @@ fn draw_gold(area: &Area, game: &Match, frames_jsonl: &str, puuid: &str) -> Draw
         pts,
         ShapeStyle::from(GREEN).stroke_width(px(3)),
     ))?;
-    draw_title(area, "Gold Lead", 24, px(92))?;
+    draw_title(area, "Gold Lead", 24, title_x)?;
     Ok(())
 }
 
@@ -183,6 +188,7 @@ fn draw_damage(area: &Area, game: &Match, puuid: &str) -> Drawn {
         .x_label_area_size(px(50))
         .y_label_area_size(px(116))
         .build_cartesian_2d(0f64..(max_dmg * 1.14), (0..n).into_segmented())?;
+    let title_x = plot_center_x(area, &chart);
     chart
         .configure_mesh()
         .disable_y_mesh()
@@ -190,8 +196,6 @@ fn draw_damage(area: &Area, game: &Match, puuid: &str) -> Drawn {
         .axis_style(GRID)
         .bold_line_style(BG)
         .light_line_style(BG)
-        .axis_desc_style(caption(13))
-        .x_desc("Damage")
         .x_label_formatter(&|v| format!("{:.0}k", v / 1000.0))
         .y_label_formatter(&|y| match y {
             SegmentValue::CenterOf(v) => rows.get(*v as usize).map(|r| r.0.clone()).unwrap_or_default(),
@@ -222,7 +226,7 @@ fn draw_damage(area: &Area, game: &Match, puuid: &str) -> Drawn {
             ShapeStyle::from(BG).stroke_width(px(3)),
         )))?;
     }
-    draw_title(area, "Damage to Champions", 22, px(116))?;
+    draw_title(area, "Damage to Champions", 22, title_x)?;
     Ok(())
 }
 
@@ -255,11 +259,12 @@ fn draw_ranking(area: &Area, game: &Match, puuid: &str) -> Drawn {
         .margin(px(20))
         .margin_top(px(TITLE_STRIP))
         .x_label_area_size(px(50))
-        .y_label_area_size(px(70))
+        .y_label_area_size(px(42))
         // Tight numeric x-range: bars centered on 0..n-1 fill the width, and
         // integer gridlines land on the bar centers (so labels center too).
         // Extra vertical headroom keeps the #N callouts clear of the bars.
         .build_cartesian_2d(-0.5f64..(n as f64 - 0.5), 0f64..(total as f64 + 0.8))?;
+    let title_x = plot_center_x(area, &chart);
     chart
         .configure_mesh()
         .disable_x_mesh()
@@ -267,10 +272,9 @@ fn draw_ranking(area: &Area, game: &Match, puuid: &str) -> Drawn {
         .axis_style(GRID)
         .bold_line_style(GRID)
         .light_line_style(BG)
-        .axis_desc_style(caption(13))
         .x_labels(metrics.len())
         .y_labels(total as usize)
-        .y_desc("Players outperformed")
+        .y_label_formatter(&|v| format!("{v:.0}"))
         .x_label_formatter(&|x| {
             let idx = x.round();
             if (idx - x).abs() < 1e-6 && idx >= 0.0 {
@@ -293,6 +297,6 @@ fn draw_ranking(area: &Area, game: &Match, puuid: &str) -> Drawn {
             centered.clone(),
         )))?;
     }
-    draw_title(area, "Lobby Ranking", 22, px(70))?;
+    draw_title(area, "Lobby Ranking", 22, title_x)?;
     Ok(())
 }
