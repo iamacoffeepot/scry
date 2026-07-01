@@ -6,11 +6,13 @@
 
 use std::error::Error;
 use std::path::Path;
+use std::sync::Once;
 
 use anyhow::{Result, anyhow};
 use plotters::coord::{CoordTranslate, Shift};
 use plotters::prelude::*;
 use plotters::style::text_anchor::{HPos, Pos, VPos};
+use plotters::style::{FontStyle, register_font};
 use riven::consts::Team;
 use riven::models::match_v5::{Match, Participant};
 use serde_json::Value;
@@ -34,6 +36,23 @@ const ENEMY: RGBColor = RGBColor(237, 66, 69); // #ED4245 red (enemy team)
 type Area<'a> = DrawingArea<BitMapBackend<'a>, Shift>;
 type Drawn = std::result::Result<(), Box<dyn Error>>;
 
+// Share Tech Mono (SIL OFL 1.1) — embedded so rendering is host-independent.
+// License at crates/scry/assets/fonts/OFL.txt.
+const FONT: &str = "sans-serif";
+const FONT_MAIN: &[u8] = include_bytes!("../assets/fonts/ShareTechMono-Regular.ttf");
+static FONTS: Once = Once::new();
+
+/// Register the embedded font (as both Normal and Bold) with plotters.
+fn init_fonts() {
+    FONTS.call_once(|| {
+        let n = register_font(FONT, FontStyle::Normal, FONT_MAIN).is_ok();
+        let b = register_font(FONT, FontStyle::Bold, FONT_MAIN).is_ok();
+        if !(n && b) {
+            eprintln!("scry: embedded font failed to register");
+        }
+    });
+}
+
 /// A pixel measurement scaled up for supersampling.
 fn px(n: u32) -> u32 {
     n * SS
@@ -49,7 +68,11 @@ const TITLE_STRIP: u32 = 44;
 
 /// Draw a panel title horizontally centered at `center_x` (a local pixel x).
 fn draw_title(area: &Area, title: &str, size: u32, center_x: i32) -> Drawn {
-    let style = caption(size).pos(Pos::new(HPos::Center, VPos::Top));
+    let style = (FONT, (size * SS) as i32)
+        .into_font()
+        .style(FontStyle::Bold)
+        .color(&FG)
+        .pos(Pos::new(HPos::Center, VPos::Top));
     area.draw(&Text::new(title.to_string(), (center_x, px(10) as i32), style))?;
     Ok(())
 }
@@ -66,6 +89,7 @@ fn plot_center_x<DB: DrawingBackend, CT: CoordTranslate>(
 
 /// Render the composite dashboard to `out` as one anti-aliased PNG.
 pub fn dashboard(game: &Match, frames_jsonl: &str, puuid: &str, out: &Path) -> Result<()> {
+    init_fonts();
     let (w, h) = (WIDTH * SS, HEIGHT * SS);
     let mut buf = vec![0u8; (w * h * 3) as usize];
     {
@@ -73,7 +97,13 @@ pub fn dashboard(game: &Match, frames_jsonl: &str, puuid: &str, out: &Path) -> R
         root.fill(&BG).map_err(|e| anyhow!("chart fill: {e}"))?;
 
         let (top, bottom) = root.split_vertically(TOP_H * SS);
-        let (bottom_left, bottom_right) = bottom.split_horizontally(w / 2);
+        // Bottom row with equal padding: [pad][damage][pad][ranking][pad].
+        let pad = w / 24;
+        let chart_w = (w - 3 * pad) / 2;
+        let (_, rest) = bottom.split_horizontally(pad);
+        let (bottom_left, rest) = rest.split_horizontally(chart_w);
+        let (_, rest) = rest.split_horizontally(pad);
+        let (bottom_right, _) = rest.split_horizontally(chart_w);
 
         draw_gold(&top, game, frames_jsonl, puuid).map_err(|e| anyhow!("gold chart: {e}"))?;
         draw_damage(&bottom_left, game, puuid).map_err(|e| anyhow!("damage chart: {e}"))?;
@@ -129,6 +159,7 @@ fn draw_gold(area: &Area, game: &Match, frames_jsonl: &str, puuid: &str) -> Draw
     let mut chart = ChartBuilder::on(area)
         .margin(px(22))
         .margin_top(px(TITLE_STRIP))
+        .margin_right(px(80))
         .x_label_area_size(px(50))
         .y_label_area_size(px(58))
         .build_cartesian_2d(0f64..max_min, -max_abs..max_abs)?;
@@ -185,6 +216,8 @@ fn draw_damage(area: &Area, game: &Match, puuid: &str) -> Drawn {
     let mut chart = ChartBuilder::on(area)
         .margin(px(20))
         .margin_top(px(TITLE_STRIP))
+        .margin_left(px(0))
+        .margin_right(px(0))
         .x_label_area_size(px(50))
         .y_label_area_size(px(116))
         .build_cartesian_2d(0f64..(max_dmg * 1.14), (0..n).into_segmented())?;
@@ -258,6 +291,8 @@ fn draw_ranking(area: &Area, game: &Match, puuid: &str) -> Drawn {
     let mut chart = ChartBuilder::on(area)
         .margin(px(20))
         .margin_top(px(TITLE_STRIP))
+        .margin_left(px(0))
+        .margin_right(px(0))
         .x_label_area_size(px(50))
         .y_label_area_size(px(42))
         // Tight numeric x-range: bars centered on 0..n-1 fill the width, and
