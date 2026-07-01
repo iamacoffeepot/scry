@@ -14,7 +14,7 @@ use plotters::prelude::*;
 use plotters::style::text_anchor::{HPos, Pos, VPos};
 use plotters::style::{FontStyle, register_font};
 use riven::consts::Team;
-use riven::models::match_v5::{Match, Participant};
+use riven::models::match_v5::Match;
 use serde_json::Value;
 
 /// Logical (post-downscale) canvas.
@@ -299,7 +299,6 @@ fn draw_matchup(area: &Area, game: &Match, puuid: &str) -> Drawn {
         .or_else(|| parts.iter().find(|p| p.team_id != player.team_id))
         .ok_or_else(|| "opponent not found".to_string())?;
 
-    let kda = |p: &Participant| (p.kills + p.assists) as f64 / p.deaths.max(1) as f64;
     let fmt_k = |v: f64| {
         if v >= 1000.0 {
             format!("{:.1}k", v / 1000.0)
@@ -309,7 +308,7 @@ fn draw_matchup(area: &Area, game: &Match, puuid: &str) -> Drawn {
     };
 
     // (name, player value, opponent value, player label, opponent label)
-    let metrics: [(&str, f64, f64, String, String); 4] = [
+    let metrics: [(&str, f64, f64, String, String); 3] = [
         (
             "Damage",
             player.total_damage_dealt_to_champions as f64,
@@ -323,13 +322,6 @@ fn draw_matchup(area: &Area, game: &Match, puuid: &str) -> Drawn {
             opponent.gold_earned as f64,
             fmt_k(player.gold_earned as f64),
             fmt_k(opponent.gold_earned as f64),
-        ),
-        (
-            "KDA",
-            kda(player),
-            kda(opponent),
-            format!("{:.1}", kda(player)),
-            format!("{:.1}", kda(opponent)),
         ),
         (
             "Vision",
