@@ -35,3 +35,6 @@
 !.claude/skills/sketch/
 !.claude/skills/sweep/
 !.claude/skills/wish/
+
+# --- poller ---
+/scripts/accounts.txt

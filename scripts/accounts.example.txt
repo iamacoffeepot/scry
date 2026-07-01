@@ -1,0 +1,13 @@
+# scry watch list — one account per line:
+#   RiotID#Tag | region | queue
+#
+# - region is a platform code: na1, euw1, eun1, kr, br1, jp1, ...
+# - queue is optional; defaults to $SCRY_QUEUE or 420 (ranked solo). Common ids:
+#     420 ranked solo · 440 ranked flex · 400 normal draft · 430 blind · 450 ARAM
+#   Use "all" for no queue filter.
+# - Blank lines and lines starting with # are ignored.
+#
+# Copy this to scripts/accounts.txt and edit.
+
+Moon#132 | na1 | 420
+# Faker#KR1 | kr | 420
