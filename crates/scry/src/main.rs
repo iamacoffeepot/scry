@@ -120,7 +120,11 @@ async fn post_from_archive(cli: &Cli, dir: &Path) -> Result<()> {
     if let Some(summary_path) = cli.summary.as_deref() {
         let md = fs::read_to_string(summary_path)
             .with_context(|| format!("reading summary {}", summary_path.display()))?;
-        embeds.push(discord::coach_embed(&summary::parse(&md), &cli.summary_model));
+        embeds.push(discord::coach_embed(
+            &summary::parse(&md),
+            &cli.summary_model,
+            match_summary.win,
+        ));
     }
 
     let mut attachments: Vec<discord::Attachment> = Vec::new();

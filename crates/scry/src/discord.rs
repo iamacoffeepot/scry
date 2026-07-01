@@ -56,13 +56,15 @@ impl Webhook {
     }
 }
 
+/// Embed tab color by result: green on win, red on loss.
+fn result_color(win: bool) -> u32 {
+    if win { 0x2ecc71 } else { 0xe74c3c }
+}
+
 /// The stats grid as a single Discord embed (the inner object, not the wrapper).
 pub fn stats_embed(s: &MatchSummary) -> Value {
-    let (result, color) = if s.win {
-        ("Victory", 0x2ecc71)
-    } else {
-        ("Defeat", 0xe74c3c)
-    };
+    let result = if s.win { "Victory" } else { "Defeat" };
+    let color = result_color(s.win);
     let mins = s.duration_secs / 60;
     let secs = s.duration_secs % 60;
 
@@ -91,7 +93,7 @@ pub fn stats_embed(s: &MatchSummary) -> Value {
 /// The coach breakdown as a Discord embed: the `Verdict` section becomes the
 /// description, every other section becomes a field. Bodies are truncated to
 /// Discord's limits.
-pub fn coach_embed(summary: &Summary, model: &str) -> Value {
+pub fn coach_embed(summary: &Summary, model: &str, win: bool) -> Value {
     let mut description = String::new();
     let mut fields: Vec<Value> = Vec::new();
     for (heading, body) in &summary.sections {
@@ -107,7 +109,7 @@ pub fn coach_embed(summary: &Summary, model: &str) -> Value {
     }
     json!({
         "title": "📜 Coach's Breakdown",
-        "color": 0x9b59b6,
+        "color": result_color(win),
         "description": description,
         "fields": fields,
         // AI-generated: attribute the model and warn the reader it can be wrong.
