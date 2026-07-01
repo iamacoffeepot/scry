@@ -85,7 +85,9 @@ async fn run(cli: Cli) -> Result<()> {
             tracing::warn!(%match_id, "player not found in match participants; skipping");
             continue;
         };
-        webhook.post(&[discord::stats_embed(&match_summary)], &[]).await?;
+        webhook
+            .post(&discord::stats_message(&match_summary, None), &[])
+            .await?;
         tracing::info!(%match_id, "posted summary");
     }
 
@@ -170,41 +172,39 @@ async fn post_from_archive(cli: &Cli, dir: &Path) -> Result<()> {
     let match_summary = stats::summarize(&game, &puuid, &ctx)
         .ok_or_else(|| anyhow!("could not summarize {} from {}", cli.riot_id, dir.display()))?;
 
-    let mut embeds = vec![discord::stats_embed(&match_summary)];
-    if let Some(summary_path) = cli.summary.as_deref() {
-        let md = fs::read_to_string(summary_path)
-            .with_context(|| format!("reading summary {}", summary_path.display()))?;
-        embeds.push(discord::coach_embed(
-            &summary::parse(&md),
-            &cli.summary_model,
-            match_summary.win,
-        ));
-    }
-
+    // Render the dashboard first so the message can reference the attachment.
     let mut attachments: Vec<discord::Attachment> = Vec::new();
-    if cli.charts {
+    let chart = if cli.charts {
         let charts_dir = dir.join("charts");
         fs::create_dir_all(&charts_dir)
             .with_context(|| format!("creating {}", charts_dir.display()))?;
         let frames = fs::read_to_string(dir.join("timeline-frames.jsonl"))
             .with_context(|| format!("reading {}", dir.join("timeline-frames.jsonl").display()))?;
-
         let events = fs::read_to_string(dir.join("timeline-events.jsonl"))
             .with_context(|| format!("reading {}", dir.join("timeline-events.jsonl").display()))?;
         let png_path = charts_dir.join("dashboard.png");
         charts::dashboard(&game, &frames, &events, &puuid, &png_path)?;
         let bytes = fs::read(&png_path).with_context(|| format!("reading {}", png_path.display()))?;
-        // Attach the dashboard to the Coach's Breakdown (the last embed).
-        let last = embeds.len() - 1;
-        embeds[last]["image"] = serde_json::json!({ "url": "attachment://dashboard.png" });
         attachments.push(discord::Attachment {
             filename: "dashboard.png".to_string(),
             bytes,
         });
-    }
+        Some("dashboard.png")
+    } else {
+        None
+    };
+
+    // With an overview, stats + separator + overview are one CV2 container.
+    let message = if let Some(summary_path) = cli.summary.as_deref() {
+        let md = fs::read_to_string(summary_path)
+            .with_context(|| format!("reading summary {}", summary_path.display()))?;
+        discord::combined_message(&match_summary, &summary::parse(&md), &cli.summary_model, chart)
+    } else {
+        discord::stats_message(&match_summary, chart)
+    };
 
     discord::Webhook::new(cli.webhook.clone())
-        .post(&embeds, &attachments)
+        .post(&message, &attachments)
         .await?;
     tracing::info!(dir = %dir.display(), "posted package from archive");
     Ok(())
