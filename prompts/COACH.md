@@ -44,6 +44,14 @@ using the exact section format defined below.
    `challenges.controlWardsPlaced`/`wardTakedowns`, and objective participation.
 5. Ground **every** claim in the data. Never invent names, numbers, or events.
    If something isn't in the data, leave it out.
+6. **Loaded terms require proof.** Only write "first blood", "ace", "Dragon
+   Soul", "steal", or "pentakill" when the data explicitly confirms it: first
+   blood is the single kill with `firstBloodKill: true` (event
+   `CHAMPION_SPECIAL_KILL` with `killType: KILL_FIRST_BLOOD`); an ace is a
+   `CHAMPION_SPECIAL_KILL` with `killType: KILL_ACE`; Soul is the
+   `DRAGON_SOUL_GIVEN` event; a steal is an `ELITE_MONSTER_KILL` whose killer is
+   on the team that did not control the pit. Never attach these words to an
+   ordinary kill or objective.
 
 ## Output format
 
