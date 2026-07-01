@@ -34,7 +34,7 @@ async fn run(cli: Cli) -> Result<()> {
 
     // Run the causal analysis over a dumped match and print the moments.
     if let Some(dir) = cli.analyze.as_deref() {
-        return analyze_archive(dir);
+        return analyze_archive(&cli.riot_id, dir);
     }
 
     let region = cli
@@ -94,20 +94,38 @@ async fn run(cli: Cli) -> Result<()> {
 
 /// Run the causal analysis over a dumped match directory and print the
 /// classified moments. Uses only the archived files — no Riot API.
-fn analyze_archive(dir: &Path) -> Result<()> {
+fn analyze_archive(riot_id: &str, dir: &Path) -> Result<()> {
     let raw = fs::read_to_string(dir.join("match.json"))
         .with_context(|| format!("reading {}", dir.join("match.json").display()))?;
     let game: Match = serde_json::from_str(&raw).context("parsing match.json into match-v5")?;
     let events = fs::read_to_string(dir.join("timeline-events.jsonl"))
         .with_context(|| format!("reading {}", dir.join("timeline-events.jsonl").display()))?;
 
-    let moments = analysis::analyze(&game, &events);
+    let (name, tag) = riot_id.split_once('#').unwrap_or((riot_id, ""));
+    let puuid = game
+        .info
+        .participants
+        .iter()
+        .find(|p| {
+            p.riot_id_game_name.as_deref() == Some(name)
+                && p.riot_id_tagline.as_deref() == Some(tag)
+        })
+        .map(|p| p.puuid.clone())
+        .ok_or_else(|| anyhow!("player {} not found in {}", riot_id, dir.display()))?;
+
+    let moments = analysis::analyze(&game, &events, &puuid);
     println!("{} moments\n", moments.len());
     for m in &moments {
+        use analysis::MomentKind::*;
         let secs = m.t_ms / 1000;
         let tag = match m.kind {
-            analysis::MomentKind::FightConversion { converted: true, .. } => "fight ✓",
-            analysis::MomentKind::FightConversion { converted: false, .. } => "fight ✗",
+            FightConversion { converted: true, .. } => "fight ✓",
+            FightConversion { converted: false, .. } => "fight ✗",
+            Death { free: true } => "death ✗",
+            Death { free: false } => "death ~",
+            Nemesis => "nemesis",
+            ObjectiveAbsence => "absent",
+            DragonMonopoly { .. } => "dragons",
         };
         println!("{:>3}:{:02}  [{tag}]  {}", secs / 60, secs % 60, m.summary);
         for e in &m.evidence {

@@ -4,9 +4,12 @@
 //! governing rule (a fact earns its place only if it relates two events in time
 //! and space).
 //!
-//! First join implemented: **fight → objective conversion**, the spine of "what
-//! decided the game". A team that wins a skirmish but takes no objective from it
-//! *squandered* it; the team that converts its fights into dragons/towers wins.
+//! Joins implemented (all Tier-1 Solid, events-only):
+//! - **fight → objective conversion** — the spine of "what decided the game".
+//! - **death quality** — each of the centered player's deaths: free or traded.
+//! - **nemesis** — one enemy accounting for the majority of the player's deaths.
+//! - **objective absence** — the player present for none of the major objectives.
+//! - **dragon monopoly** — one team taking every dragon.
 
 use riven::consts::Team;
 use riven::models::match_v5::Match;
@@ -28,6 +31,14 @@ pub struct Moment {
 pub enum MomentKind {
     /// A won skirmish and whether it was cashed into an objective.
     FightConversion { team: i32, converted: bool },
+    /// One of the centered player's deaths.
+    Death { free: bool },
+    /// One enemy killed the player a majority of the time.
+    Nemesis,
+    /// The player took part in none of the game's major objectives.
+    ObjectiveAbsence,
+    /// One team took every dragon.
+    DragonMonopoly { team: i32 },
 }
 
 /// A won fight must have at least this kill lead and the loser at most one kill.
@@ -37,13 +48,21 @@ const WON_FIGHT_MAX_LOSER_KILLS: usize = 1;
 const FIGHT_GAP_MS: i64 = 20_000;
 /// An objective within this long after a fight's last kill counts as converted.
 const CONVERSION_WINDOW_MS: i64 = 90_000;
+/// A death is "traded" if an allied kill lands from this long before it to
+/// `TRADE_AFTER_MS` after it, within `TRADE_RADIUS` units of the death.
+const TRADE_BEFORE_MS: i64 = 3_000;
+const TRADE_AFTER_MS: i64 = 10_000;
+const TRADE_RADIUS: f64 = 2_000.0;
 
 /// Analyze `events_jsonl` (one timeline event per line) against the typed match,
-/// returning the moments in chronological order.
-pub fn analyze(game: &Match, events_jsonl: &str) -> Vec<Moment> {
+/// centered on the player with `puuid`, returning moments in chronological order.
+pub fn analyze(game: &Match, events_jsonl: &str, puuid: &str) -> Vec<Moment> {
     let team_of = team_by_participant(game);
+    let player = game.info.participants.iter().find(|p| p.puuid == puuid);
+    let player_id = player.map(|p| p.participant_id);
+    let player_team = player.map(|p| team_i32(p.team_id));
 
-    let mut kills: Vec<Kill> = Vec::new();
+    let mut kills: Vec<KillEv> = Vec::new();
     let mut objectives: Vec<Objective> = Vec::new();
     for line in events_jsonl.lines() {
         let line = line.trim();
@@ -55,35 +74,42 @@ pub fn analyze(game: &Match, events_jsonl: &str) -> Vec<Moment> {
         };
         match ev.get("type").and_then(Value::as_str) {
             Some("CHAMPION_KILL") => {
-                let t = ev.get("timestamp").and_then(Value::as_i64).unwrap_or(0);
-                let killer = ev.get("killerId").and_then(Value::as_i64).unwrap_or(0);
-                let team = team_of_participant(&team_of, killer);
-                if team == 100 || team == 200 {
-                    kills.push(Kill { t, team });
-                }
+                kills.push(KillEv {
+                    t: ev.get("timestamp").and_then(Value::as_i64).unwrap_or(0),
+                    killer: ev.get("killerId").and_then(Value::as_i64).unwrap_or(0) as i32,
+                    victim: ev.get("victimId").and_then(Value::as_i64).unwrap_or(0) as i32,
+                    killer_team: team_of_participant(
+                        &team_of,
+                        ev.get("killerId").and_then(Value::as_i64).unwrap_or(0),
+                    ),
+                    x: ev.pointer("/position/x").and_then(Value::as_f64).unwrap_or(0.0),
+                    y: ev.pointer("/position/y").and_then(Value::as_f64).unwrap_or(0.0),
+                });
             }
             Some("ELITE_MONSTER_KILL") => {
-                let t = ev.get("timestamp").and_then(Value::as_i64).unwrap_or(0);
                 let team = ev.get("killerTeamId").and_then(Value::as_i64).unwrap_or(0) as i32;
                 // 0/300 are neutral-despawn sentinels — nobody secured it.
                 if team == 100 || team == 200 {
                     objectives.push(Objective {
-                        t,
+                        t: ev.get("timestamp").and_then(Value::as_i64).unwrap_or(0),
                         team,
+                        monster: monster_kind(&ev),
                         label: monster_label(&ev),
+                        participants: monster_participants(&ev),
                     });
                 }
             }
             Some("BUILDING_KILL") => {
-                let t = ev.get("timestamp").and_then(Value::as_i64).unwrap_or(0);
                 // `teamId` is the building's OWNER; the destroyer is the enemy.
                 let owner = ev.get("teamId").and_then(Value::as_i64).unwrap_or(0);
                 let team = other_team(owner);
                 if team == 100 || team == 200 {
                     objectives.push(Objective {
-                        t,
+                        t: ev.get("timestamp").and_then(Value::as_i64).unwrap_or(0),
                         team,
+                        monster: Monster::Building,
                         label: building_label(&ev),
+                        participants: Vec::new(),
                     });
                 }
             }
@@ -94,7 +120,31 @@ pub fn analyze(game: &Match, events_jsonl: &str) -> Vec<Moment> {
     kills.sort_by_key(|k| k.t);
     objectives.sort_by_key(|o| o.t);
 
-    let mut won: Vec<WonFight> = cluster_fights(&kills)
+    let mut moments = fight_conversions(&kills, &objectives);
+    if let (Some(pid), Some(pteam)) = (player_id, player_team) {
+        moments.extend(death_moments(&kills, pid, pteam, game));
+        moments.extend(nemesis_moment(&kills, pid, game));
+        moments.extend(objective_absence_moment(&objectives, pid));
+    }
+    moments.extend(dragon_monopoly_moment(&objectives));
+
+    moments.sort_by_key(|m| m.t_ms);
+    moments
+}
+
+// --- fight -> objective conversion ------------------------------------------
+
+fn fight_conversions(kills: &[KillEv], objectives: &[Objective]) -> Vec<Moment> {
+    let team_kills: Vec<Kill> = kills
+        .iter()
+        .filter(|k| k.killer_team == 100 || k.killer_team == 200)
+        .map(|k| Kill {
+            t: k.t,
+            team: k.killer_team,
+        })
+        .collect();
+
+    let mut won: Vec<WonFight> = cluster_fights(&team_kills)
         .into_iter()
         .filter_map(WonFight::from_fight)
         .collect();
@@ -102,7 +152,7 @@ pub fn analyze(game: &Match, events_jsonl: &str) -> Vec<Moment> {
     // Attribute each objective to a SINGLE fight — the nearest won fight (by the
     // same team) it could have come from — so a shared tower isn't credited to
     // several fights at once.
-    for o in &objectives {
+    for o in objectives {
         let claimant = won
             .iter_mut()
             .filter(|f| {
@@ -117,9 +167,134 @@ pub fn analyze(game: &Match, events_jsonl: &str) -> Vec<Moment> {
         }
     }
 
-    let mut moments: Vec<Moment> = won.into_iter().map(WonFight::into_moment).collect();
-    moments.sort_by_key(|m| m.t_ms);
-    moments
+    won.into_iter().map(WonFight::into_moment).collect()
+}
+
+// --- death quality ----------------------------------------------------------
+
+fn death_moments(kills: &[KillEv], pid: i32, pteam: i32, game: &Match) -> Vec<Moment> {
+    kills
+        .iter()
+        .filter(|k| k.victim == pid)
+        .map(|death| {
+            // Traded if an allied kill lands close in time and space.
+            let traded = kills.iter().any(|a| {
+                a.killer_team == pteam
+                    && a.t >= death.t - TRADE_BEFORE_MS
+                    && a.t <= death.t + TRADE_AFTER_MS
+                    && dist(a.x, a.y, death.x, death.y) <= TRADE_RADIUS
+            });
+            let killer = champ_of(game, death.killer);
+            let summary = if traded {
+                format!("You died to {killer} at {} — a trade", mmss(death.t))
+            } else {
+                format!("You died to {killer} at {} with no trade (a free death)", mmss(death.t))
+            };
+            Moment {
+                t_ms: death.t,
+                kind: MomentKind::Death { free: !traded },
+                summary,
+                evidence: vec![format!("death at ({:.0},{:.0})", death.x, death.y)],
+            }
+        })
+        .collect()
+}
+
+// --- nemesis ----------------------------------------------------------------
+
+fn nemesis_moment(kills: &[KillEv], pid: i32, game: &Match) -> Option<Moment> {
+    let deaths: Vec<&KillEv> = kills.iter().filter(|k| k.victim == pid).collect();
+    if deaths.len() < 3 {
+        return None;
+    }
+    // Most frequent killer.
+    let mut best_killer = 0;
+    let mut best_count = 0;
+    for &k in &deaths {
+        let count = deaths.iter().filter(|d| d.killer == k.killer).count();
+        if count > best_count {
+            best_count = count;
+            best_killer = k.killer;
+        }
+    }
+    if best_count * 2 < deaths.len() {
+        return None;
+    }
+    let champ = champ_of(game, best_killer);
+    let last = deaths.iter().map(|d| d.t).max().unwrap_or(0);
+    Some(Moment {
+        t_ms: last,
+        kind: MomentKind::Nemesis,
+        summary: format!(
+            "{champ} was your nemesis — {best_count} of your {} deaths",
+            deaths.len()
+        ),
+        evidence: vec![format!("{best_count}/{} deaths to one enemy", deaths.len())],
+    })
+}
+
+// --- objective absence ------------------------------------------------------
+
+fn objective_absence_moment(objectives: &[Objective], pid: i32) -> Option<Moment> {
+    let majors: Vec<&Objective> = objectives.iter().filter(|o| o.monster.is_major()).collect();
+    if majors.len() < 3 {
+        return None;
+    }
+    let present = majors
+        .iter()
+        .filter(|o| o.participants.contains(&pid))
+        .count();
+    if present > 0 {
+        return None;
+    }
+    let last = majors.iter().map(|o| o.t).max().unwrap_or(0);
+    Some(Moment {
+        t_ms: last,
+        kind: MomentKind::ObjectiveAbsence,
+        summary: format!(
+            "You took part in none of the {} major objectives (dragons/Baron/Herald)",
+            majors.len()
+        ),
+        evidence: vec![format!("0/{} major objectives", majors.len())],
+    })
+}
+
+// --- dragon monopoly --------------------------------------------------------
+
+fn dragon_monopoly_moment(objectives: &[Objective]) -> Option<Moment> {
+    let dragons: Vec<&Objective> = objectives
+        .iter()
+        .filter(|o| o.monster == Monster::Dragon)
+        .collect();
+    if dragons.len() < 3 {
+        return None;
+    }
+    let team = dragons[0].team;
+    if !dragons.iter().all(|d| d.team == team) {
+        return None;
+    }
+    let last = dragons.iter().map(|d| d.t).max().unwrap_or(0);
+    Some(Moment {
+        t_ms: last,
+        kind: MomentKind::DragonMonopoly { team },
+        summary: format!(
+            "{} monopolized the dragons — all {} of them",
+            side_name(team),
+            dragons.len()
+        ),
+        evidence: vec![format!("{}-0 on dragons", dragons.len())],
+    })
+}
+
+// --- types ------------------------------------------------------------------
+
+struct KillEv {
+    t: i64,
+    killer: i32,
+    victim: i32,
+    killer_team: i32,
+    x: f64,
+    y: f64,
 }
 
 struct Kill {
@@ -127,10 +302,29 @@ struct Kill {
     team: i32,
 }
 
+#[derive(PartialEq, Eq)]
+enum Monster {
+    Dragon,
+    Baron,
+    Herald,
+    Grub,
+    Building,
+}
+
+impl Monster {
+    /// Major neutral objectives worth participating in.
+    fn is_major(&self) -> bool {
+        matches!(self, Monster::Dragon | Monster::Baron | Monster::Herald)
+    }
+}
+
 struct Objective {
     t: i64,
     team: i32,
+    monster: Monster,
     label: String,
+    /// killer + assists (participant ids) for the take.
+    participants: Vec<i32>,
 }
 
 /// A time-clustered skirmish.
@@ -246,6 +440,8 @@ fn cluster_fights(kills: &[Kill]) -> Vec<Fight> {
     fights
 }
 
+// --- helpers ----------------------------------------------------------------
+
 /// participantId (1..=10) -> team id (100/200), indexed by participant order.
 fn team_by_participant(game: &Match) -> Vec<(i32, i32)> {
     game.info
@@ -257,7 +453,7 @@ fn team_by_participant(game: &Match) -> Vec<(i32, i32)> {
 
 fn team_of_participant(map: &[(i32, i32)], participant_id: i64) -> i32 {
     map.iter()
-        .find(|(id, _)| *id as i64 == participant_id)
+        .find(|(id, _)| i64::from(*id) == participant_id)
         .map(|(_, team)| *team)
         .unwrap_or(0)
 }
@@ -284,6 +480,35 @@ fn side_name(team: i32) -> &'static str {
         200 => "Red side",
         _ => "A team",
     }
+}
+
+fn champ_of(game: &Match, participant_id: i32) -> String {
+    game.info
+        .participants
+        .iter()
+        .find(|p| p.participant_id == participant_id)
+        .map(|p| p.champion_name.clone())
+        .unwrap_or_else(|| "an enemy".to_string())
+}
+
+fn monster_kind(ev: &Value) -> Monster {
+    match ev.get("monsterType").and_then(Value::as_str) {
+        Some("BARON_NASHOR") => Monster::Baron,
+        Some("RIFTHERALD") => Monster::Herald,
+        Some("HORDE") => Monster::Grub,
+        _ => Monster::Dragon,
+    }
+}
+
+fn monster_participants(ev: &Value) -> Vec<i32> {
+    let mut parts = Vec::new();
+    if let Some(k) = ev.get("killerId").and_then(Value::as_i64) {
+        parts.push(k as i32);
+    }
+    if let Some(a) = ev.get("assistingParticipantIds").and_then(Value::as_array) {
+        parts.extend(a.iter().filter_map(Value::as_i64).map(|n| n as i32));
+    }
+    parts
 }
 
 fn monster_label(ev: &Value) -> String {
@@ -319,6 +544,10 @@ fn building_label(ev: &Value) -> String {
     }
 }
 
+fn dist(x0: f64, y0: f64, x1: f64, y1: f64) -> f64 {
+    ((x1 - x0).powi(2) + (y1 - y0).powi(2)).sqrt()
+}
+
 /// Format ms-from-start as `m:ss`.
 fn mmss(ms: i64) -> String {
     let secs = ms / 1000;
@@ -330,52 +559,82 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    const MOON_PUUID: &str =
+        "Mbv5r1kdyiQ3LgUGDz_gGPw73yE1GUvkPpAnI3-1Yg3wWivrzaI1E-TvYS7bNvSw3RZzg4yRhw35AA";
+
     fn fixture() -> Option<(Match, String)> {
-        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../archive/NA1/5592214271");
+        let dir =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../archive/NA1/5592214271");
         let match_json = std::fs::read_to_string(dir.join("match.json")).ok()?;
         let events = std::fs::read_to_string(dir.join("timeline-events.jsonl")).ok()?;
         let game: Match = serde_json::from_str(&match_json).ok()?;
         Some((game, events))
     }
 
-    /// The headline finding: Red side (Moon's team) won multiple early fights
-    /// but squandered them, while Blue side converted its fights. That
-    /// conversion gap — not laning — is why Red lost.
+    /// The headline: Red side (Moon's team) won multiple early fights but
+    /// squandered them, while Blue side converted its fights.
     #[test]
     fn conversion_gap_is_the_story() {
         let Some((game, events)) = fixture() else {
             eprintln!("fixture archive absent; skipping");
             return;
         };
-        let moments = analyze(&game, &events);
+        let moments = analyze(&game, &events, MOON_PUUID);
 
         let (mut red_won, mut red_conv, mut blue_won, mut blue_conv) = (0, 0, 0, 0);
         for m in &moments {
-            let MomentKind::FightConversion { team, converted } = m.kind;
-            match team {
-                200 => {
-                    red_won += 1;
-                    red_conv += i32::from(converted);
+            if let MomentKind::FightConversion { team, converted } = m.kind {
+                match team {
+                    200 => {
+                        red_won += 1;
+                        red_conv += i32::from(converted);
+                    }
+                    100 => {
+                        blue_won += 1;
+                        blue_conv += i32::from(converted);
+                    }
+                    _ => {}
                 }
-                100 => {
-                    blue_won += 1;
-                    blue_conv += i32::from(converted);
-                }
-                _ => {}
             }
         }
-
-        // Red won several fights but converted the minority of them.
         assert!(red_won >= 3, "expected Red to win >=3 fights, got {red_won}");
         assert!(
             red_conv * 2 <= red_won,
             "expected Red to squander most fights ({red_conv}/{red_won} converted)"
         );
-        // Blue converted the majority of its fights.
         assert!(
             blue_conv * 2 > blue_won,
             "expected Blue to convert most fights ({blue_conv}/{blue_won} converted)"
+        );
+    }
+
+    /// Moon died mostly for nothing, to one repeat killer, and touched no epics.
+    #[test]
+    fn moon_death_and_objective_signals() {
+        let Some((game, events)) = fixture() else {
+            eprintln!("fixture archive absent; skipping");
+            return;
+        };
+        let moments = analyze(&game, &events, MOON_PUUID);
+
+        let free = moments
+            .iter()
+            .filter(|m| matches!(m.kind, MomentKind::Death { free: true }))
+            .count();
+        assert!(free >= 5, "expected many free deaths, got {free}");
+        assert!(
+            moments.iter().any(|m| m.kind == MomentKind::Nemesis),
+            "expected a nemesis moment"
+        );
+        assert!(
+            moments.iter().any(|m| m.kind == MomentKind::ObjectiveAbsence),
+            "expected Moon absent from all majors"
+        );
+        assert!(
+            moments
+                .iter()
+                .any(|m| matches!(m.kind, MomentKind::DragonMonopoly { team: 100 })),
+            "expected Blue dragon monopoly"
         );
     }
 }
