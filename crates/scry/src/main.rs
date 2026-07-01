@@ -114,7 +114,6 @@ fn analyze_archive(riot_id: &str, dir: &Path) -> Result<()> {
         .ok_or_else(|| anyhow!("player {} not found in {}", riot_id, dir.display()))?;
 
     let moments = analysis::analyze(&game, &events, &puuid);
-    println!("{} moments\n", moments.len());
     for m in &moments {
         use analysis::MomentKind::*;
         let secs = m.t_ms / 1000;
@@ -132,6 +131,12 @@ fn analyze_archive(riot_id: &str, dir: &Path) -> Result<()> {
             println!("           · {e}");
         }
     }
+
+    // Write the grounded-facts brief the OVERVIEW prompt consumes.
+    let md = analysis::render_moments_md(&moments, name);
+    let out = dir.join("moments.md");
+    fs::write(&out, md).with_context(|| format!("writing {}", out.display()))?;
+    println!("\n{} moments -> {}", moments.len(), out.display());
     Ok(())
 }
 

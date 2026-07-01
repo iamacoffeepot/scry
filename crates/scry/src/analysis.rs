@@ -132,6 +132,48 @@ pub fn analyze(game: &Match, events_jsonl: &str, puuid: &str) -> Vec<Moment> {
     moments
 }
 
+/// Render the moments as an authoritative grounded-facts brief for the OVERVIEW
+/// prompt: a chronological list plus the aggregate player signals.
+pub fn render_moments_md(moments: &[Moment], player: &str) -> String {
+    let mut out = String::new();
+    out.push_str("# Grounded analysis (precomputed — authoritative)\n\n");
+    out.push_str(&format!(
+        "These causal facts were computed directly from the match timeline, centered on \
+         **{player}**. Treat them as ground truth: build the overview from them, and do not \
+         recompute, contradict, or invent beyond them. Use the raw files only for color \
+         (champion matchups, item/level context), never to override a fact below.\n\n",
+    ));
+
+    out.push_str("## Decisive moments (chronological)\n");
+    for m in moments {
+        out.push_str(&format!("- {} — {}\n", mmss(m.t_ms), m.summary));
+    }
+
+    let deaths = moments
+        .iter()
+        .filter(|m| matches!(m.kind, MomentKind::Death { .. }))
+        .count();
+    let free = moments
+        .iter()
+        .filter(|m| matches!(m.kind, MomentKind::Death { free: true }))
+        .count();
+    out.push_str("\n## Player signals\n");
+    if deaths > 0 {
+        out.push_str(&format!(
+            "- Deaths: {deaths}, of which {free} were free (died with no trade)\n"
+        ));
+    }
+    for m in moments {
+        match m.kind {
+            MomentKind::Nemesis | MomentKind::ObjectiveAbsence => {
+                out.push_str(&format!("- {}\n", m.summary));
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 // --- fight -> objective conversion ------------------------------------------
 
 fn fight_conversions(kills: &[KillEv], objectives: &[Objective]) -> Vec<Moment> {

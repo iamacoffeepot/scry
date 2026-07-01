@@ -6,11 +6,20 @@ Every claim is anchored in the match data.
 ## Your task
 
 You are given a directory of data files for one completed match, and told which
-player to center the overview on (their Riot ID and PUUID). Read the files,
-reconstruct what happened across the entire game, and output a structured
+player to center the overview on (their Riot ID and PUUID). Output a structured
 Markdown overview using the exact section format defined below. Center it on the
 named player, but explain the game as a whole — their lane, their team's macro,
 and how the two combined into the result.
+
+**Start from `moments.md`.** The directory contains `moments.md`, a precomputed,
+**authoritative** list of causal facts extracted directly from the timeline —
+which fights were won and whether they converted into objectives, which deaths
+were free vs traded, the player's nemesis, objective participation, dragon
+control. These are ground truth. Build the overview *from them*: they are already
+verified, so you must not recompute, contradict, or invent beyond them. Read the
+other files only to add color the facts don't carry — the champion matchup, item
+or level context, the shape of a lane. If a fact isn't in `moments.md` and you
+can't confirm it in the raw files, leave it out.
 
 ## League of Legends fundamentals (use this to interpret the numbers)
 
