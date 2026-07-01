@@ -114,8 +114,14 @@ fn analyze_archive(riot_id: &str, dir: &Path) -> Result<()> {
         .participants
         .iter()
         .find(|p| {
-            p.riot_id_game_name.as_deref() == Some(name)
-                && p.riot_id_tagline.as_deref() == Some(tag)
+            // Riot IDs are case-insensitive; match data stores the registered
+            // casing (often lowercase), so compare without case.
+            p.riot_id_game_name
+                .as_deref()
+                .is_some_and(|n| n.eq_ignore_ascii_case(name))
+                && p.riot_id_tagline
+                    .as_deref()
+                    .is_some_and(|t| t.eq_ignore_ascii_case(tag))
         })
         .map(|p| p.puuid.clone())
         .ok_or_else(|| anyhow!("player {} not found in {}", riot_id, dir.display()))?;
@@ -163,8 +169,14 @@ async fn post_from_archive(cli: &Cli, dir: &Path) -> Result<()> {
         .participants
         .iter()
         .find(|p| {
-            p.riot_id_game_name.as_deref() == Some(name)
-                && p.riot_id_tagline.as_deref() == Some(tag)
+            // Riot IDs are case-insensitive; match data stores the registered
+            // casing (often lowercase), so compare without case.
+            p.riot_id_game_name
+                .as_deref()
+                .is_some_and(|n| n.eq_ignore_ascii_case(name))
+                && p.riot_id_tagline
+                    .as_deref()
+                    .is_some_and(|t| t.eq_ignore_ascii_case(tag))
         })
         .ok_or_else(|| anyhow!("player {} not found in {}", cli.riot_id, dir.display()))?;
     let puuid = player.puuid.clone();
