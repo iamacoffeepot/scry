@@ -86,7 +86,7 @@ pub fn stats_embed(s: &MatchSummary) -> Value {
                 s.vision.wards_placed, s.vision.wards_killed, s.vision.control_wards_bought),
                 "inline": false },
         ],
-        "footer": { "text": "scry" }
+        "footer": { "text": "scry - github.com/iamacoffeepot/scry" }
     })
 }
 
@@ -108,7 +108,7 @@ pub fn coach_embed(summary: &Summary, model: &str, win: bool) -> Value {
         }
     }
     json!({
-        "title": "📜 Coach's Breakdown",
+        "title": "Overview",
         "color": result_color(win),
         "description": description,
         "fields": fields,

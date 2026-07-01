@@ -187,7 +187,7 @@ fn draw_gold(area: &Area, game: &Match, frames_jsonl: &str, puuid: &str) -> Draw
     let title_x = plot_center_x(area, &chart);
     chart
         .configure_mesh()
-        .label_style(caption(13))
+        .label_style(caption(17))
         .axis_style(GRID)
         .bold_line_style(GRID)
         .light_line_style(BG)
@@ -202,7 +202,7 @@ fn draw_gold(area: &Area, game: &Match, frames_jsonl: &str, puuid: &str) -> Draw
         pts,
         ShapeStyle::from(GREEN).stroke_width(px(3)),
     ))?;
-    draw_title(area, "Gold Lead", 24, title_x)?;
+    draw_title(area, "Gold Difference", 28, title_x)?;
     Ok(())
 }
 
@@ -246,7 +246,7 @@ fn draw_damage(area: &Area, game: &Match, puuid: &str) -> Drawn {
     chart
         .configure_mesh()
         .disable_y_mesh()
-        .label_style(caption(13))
+        .label_style(caption(17))
         .axis_style(GRID)
         .bold_line_style(BG)
         .light_line_style(BG)
@@ -280,7 +280,7 @@ fn draw_damage(area: &Area, game: &Match, puuid: &str) -> Drawn {
             ShapeStyle::from(BG).stroke_width(px(3)),
         )))?;
     }
-    draw_title(area, "Damage to Champions", 22, title_x)?;
+    draw_title(area, "Damage to Champions", 26, title_x)?;
     Ok(())
 }
 
@@ -346,7 +346,7 @@ fn draw_matchup(area: &Area, game: &Match, puuid: &str) -> Drawn {
         .configure_mesh()
         .disable_x_mesh()
         .disable_y_mesh()
-        .label_style(caption(13))
+        .label_style(caption(17))
         .axis_style(GRID)
         .x_labels(metrics.len())
         .y_labels(0)
@@ -360,7 +360,7 @@ fn draw_matchup(area: &Area, game: &Match, puuid: &str) -> Drawn {
         })
         .draw()?;
 
-    let value_style = caption(12).pos(Pos::new(HPos::Center, VPos::Bottom));
+    let value_style = caption(16).pos(Pos::new(HPos::Center, VPos::Bottom));
     for (i, (_, pv, ov, plabel, olabel)) in metrics.iter().enumerate() {
         let max = pv.max(*ov).max(1.0);
         let (ph, oh) = (pv / max, ov / max);
@@ -387,6 +387,6 @@ fn draw_matchup(area: &Area, game: &Match, puuid: &str) -> Drawn {
     }
 
     let opp = spaced_name(&opponent.champion_name);
-    draw_title(area, &format!("You vs {opp}"), 20, title_x)?;
+    draw_title(area, &format!("You vs {opp}"), 24, title_x)?;
     Ok(())
 }
