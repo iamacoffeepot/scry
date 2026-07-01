@@ -292,7 +292,7 @@ fn draw_gold(
         } else {
             let r = erow;
             erow += 1.0;
-            (max_min * 0.40, max_min * 0.415, r)
+            (max_min * 0.16, max_min * 0.175, r)
         };
         let y = top_y - step * row;
         chart.draw_series(std::iter::once(Circle::new((sx, y), px(6) as i32, color.filled())))?;
