@@ -86,7 +86,7 @@ process_account() {
   # can't be driven while a game is live and isn't downloadable the instant a
   # game ends — so they must run serially, only when the client is idle.
   if $scry --from-archive "$dir" --riot-id "$rid" \
-      --summary "$dir/overview.md" --summary-model "$model" --charts --track-lp; then
+      --summary "$dir/overview.md" --summary-model "$model" --no-overview --track-lp; then
     touch "$marker"
     # Remember who this post centers on so the clip pass can rebuild it. (One
     # clip job per game: for a game shared by two tracked players, the clips
@@ -174,7 +174,7 @@ clips_pass() {
     fi
     # Edit the existing message to attach the clips (reuses post-time LP; no API).
     if $scry --from-archive "$dir" --riot-id "$rid" \
-        --summary "$dir/overview.md" --summary-model "$model" --charts --edit; then
+        --summary "$dir/overview.md" --summary-model "$model" --no-overview --edit; then
       touch "$dir/.clips-done"
       log "clips attached for $rid"
     else

@@ -72,6 +72,12 @@ pub struct Cli {
     #[arg(long)]
     pub analyze: Option<PathBuf>,
 
+    /// With --from-archive + --summary: render a minimal embed (header + stats +
+    /// clips) that omits the AI overview prose. The summary is still read for the
+    /// Highlight/Lowlight clip captions.
+    #[arg(long)]
+    pub no_overview: bool,
+
     /// With --from-archive: edit the message already posted for this archive
     /// (id read from <dir>/.message-id) instead of posting a new one — used to
     /// attach the Highlight/Lowlight clips once they've been recorded. Reuses

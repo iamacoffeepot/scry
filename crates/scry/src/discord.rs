@@ -141,6 +141,26 @@ pub fn stats_message(
     container_message(s.win, body)
 }
 
+/// A minimal message: header + stats + the captioned clips, with no AI-overview
+/// prose and no chart. `summary` is used only for the clip captions.
+pub fn clips_message(
+    s: &MatchSummary,
+    summary: &Summary,
+    model: &str,
+    highlight: Option<&str>,
+    lowlight: Option<&str>,
+) -> Value {
+    let mut body = vec![header_section(s), text(stats_text(s))];
+    if let Some(clip) = highlight {
+        clip_block(&mut body, "Highlight", summary.section("Highlight"), clip);
+    }
+    if let Some(clip) = lowlight {
+        clip_block(&mut body, "Lowlight", summary.section("Lowlight"), clip);
+    }
+    body.push(footer(Some(model)));
+    container_message(s.win, body)
+}
+
 /// The full package: stats, a real Separator, the AI overview, and the chart —
 /// all in one Components-V2 container (the accent bar keys off the result).
 pub fn combined_message(
