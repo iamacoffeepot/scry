@@ -57,6 +57,24 @@ fn px(n: u32) -> u32 {
     n * SS
 }
 
+/// Linear-interpolate the y of a polyline at `x` (clamped to the ends).
+fn line_y_at(pts: &[(f64, f64)], x: f64) -> f64 {
+    if pts.is_empty() {
+        return 0.0;
+    }
+    if x <= pts[0].0 {
+        return pts[0].1;
+    }
+    for w in pts.windows(2) {
+        let ((x0, y0), (x1, y1)) = (w[0], w[1]);
+        if x <= x1 {
+            let t = (x - x0) / (x1 - x0).max(f64::EPSILON);
+            return y0 + t * (y1 - y0);
+        }
+    }
+    pts[pts.len() - 1].1
+}
+
 /// Insert spaces at camelCase boundaries: "LeeSin" -> "Lee Sin".
 fn spaced_name(name: &str) -> String {
     let mut out = String::new();
@@ -108,7 +126,13 @@ fn plot_center_x<DB: DrawingBackend, CT: CoordTranslate>(
 }
 
 /// Render the composite dashboard to `out` as one anti-aliased PNG.
-pub fn dashboard(game: &Match, frames_jsonl: &str, puuid: &str, out: &Path) -> Result<()> {
+pub fn dashboard(
+    game: &Match,
+    frames_jsonl: &str,
+    events_jsonl: &str,
+    puuid: &str,
+    out: &Path,
+) -> Result<()> {
     init_fonts();
     let (w, h) = (WIDTH * SS, HEIGHT * SS);
     let mut buf = vec![0u8; (w * h * 3) as usize];
@@ -126,7 +150,8 @@ pub fn dashboard(game: &Match, frames_jsonl: &str, puuid: &str, out: &Path) -> R
         let (_, rest) = rest.split_horizontally(pad);
         let (bottom_right, _) = rest.split_horizontally(chart_w);
 
-        draw_gold(&top, game, frames_jsonl, puuid).map_err(|e| anyhow!("gold chart: {e}"))?;
+        draw_gold(&top, game, frames_jsonl, events_jsonl, puuid)
+            .map_err(|e| anyhow!("gold chart: {e}"))?;
         draw_damage(&bottom_left, game, puuid).map_err(|e| anyhow!("damage chart: {e}"))?;
         draw_matchup(&bottom_right, game, puuid).map_err(|e| anyhow!("matchup chart: {e}"))?;
 
@@ -140,7 +165,13 @@ pub fn dashboard(game: &Match, frames_jsonl: &str, puuid: &str, out: &Path) -> R
 }
 
 /// Gold lead over time, from the tracked player's team's perspective.
-fn draw_gold(area: &Area, game: &Match, frames_jsonl: &str, puuid: &str) -> Drawn {
+fn draw_gold(
+    area: &Area,
+    game: &Match,
+    frames_jsonl: &str,
+    events_jsonl: &str,
+    puuid: &str,
+) -> Drawn {
     let player = game
         .info
         .participants
@@ -199,9 +230,37 @@ fn draw_gold(area: &Area, game: &Match, frames_jsonl: &str, puuid: &str) -> Draw
         ShapeStyle::from(GRID).stroke_width(SS),
     ))?;
     chart.draw_series(LineSeries::new(
-        pts,
+        pts.clone(),
         ShapeStyle::from(GREEN).stroke_width(px(3)),
     ))?;
+
+    // Kill markers on the line: (minute, gold-diff at that minute, ally?).
+    let mut kills: Vec<(f64, f64, bool)> = Vec::new();
+    for line in events_jsonl.lines().filter(|l| !l.trim().is_empty()) {
+        let v: Value = serde_json::from_str(line)?;
+        if v["type"] != "CHAMPION_KILL" {
+            continue;
+        }
+        let killer = v["killerId"].as_i64().unwrap_or(0) as i32;
+        if !(1..=10).contains(&killer) {
+            continue; // executions / tower kills have no champion killer
+        }
+        let minute = v["timestamp"].as_f64().unwrap_or(0.0) / 60_000.0;
+        let ally = team_of.get(&killer) == Some(&player_team);
+        kills.push((minute, line_y_at(&pts, minute), ally));
+    }
+    // Draw large->small so the solid centers stay on top of every halo.
+    for (radius, alpha) in [(px(13), 0.16f64), (px(8), 0.4), (px(4), 1.0)] {
+        for (x, y, ally) in &kills {
+            let base = if *ally { ALLY } else { ENEMY };
+            chart.draw_series(std::iter::once(Circle::new(
+                (*x, *y),
+                radius as i32,
+                base.mix(alpha).filled(),
+            )))?;
+        }
+    }
+
     draw_title(area, "Gold Difference", 28, title_x)?;
     Ok(())
 }

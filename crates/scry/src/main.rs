@@ -135,8 +135,10 @@ async fn post_from_archive(cli: &Cli, dir: &Path) -> Result<()> {
         let frames = fs::read_to_string(dir.join("timeline-frames.jsonl"))
             .with_context(|| format!("reading {}", dir.join("timeline-frames.jsonl").display()))?;
 
+        let events = fs::read_to_string(dir.join("timeline-events.jsonl"))
+            .with_context(|| format!("reading {}", dir.join("timeline-events.jsonl").display()))?;
         let png_path = charts_dir.join("dashboard.png");
-        charts::dashboard(&game, &frames, &puuid, &png_path)?;
+        charts::dashboard(&game, &frames, &events, &puuid, &png_path)?;
         let bytes = fs::read(&png_path).with_context(|| format!("reading {}", png_path.display()))?;
         // Attach the dashboard to the Coach's Breakdown (the last embed).
         let last = embeds.len() - 1;
