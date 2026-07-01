@@ -237,11 +237,32 @@ async fn post_from_archive(cli: &Cli, dir: &Path) -> Result<()> {
         None
     };
 
+    // Embed the highlight clip if one's been recorded into the archive dir
+    // (kept as a first-class artifact next to match.json / moments.md).
+    let highlight_path = dir.join("highlight.mp4");
+    let highlight = if highlight_path.exists() {
+        let bytes = fs::read(&highlight_path)
+            .with_context(|| format!("reading {}", highlight_path.display()))?;
+        attachments.push(discord::Attachment {
+            filename: "highlight.mp4".to_string(),
+            bytes,
+        });
+        Some("highlight.mp4")
+    } else {
+        None
+    };
+
     // With an overview, stats + separator + overview are one CV2 container.
     let message = if let Some(summary_path) = cli.summary.as_deref() {
         let md = fs::read_to_string(summary_path)
             .with_context(|| format!("reading summary {}", summary_path.display()))?;
-        discord::combined_message(&match_summary, &summary::parse(&md), &cli.summary_model, chart)
+        discord::combined_message(
+            &match_summary,
+            &summary::parse(&md),
+            &cli.summary_model,
+            chart,
+            highlight,
+        )
     } else {
         discord::stats_message(&match_summary, chart)
     };

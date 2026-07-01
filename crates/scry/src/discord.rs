@@ -40,9 +40,14 @@ impl Webhook {
                 serde_json::to_string(payload).context("serializing webhook payload")?,
             );
             for (i, a) in attachments.iter().enumerate() {
+                let mime = match a.filename.rsplit('.').next() {
+                    Some("mp4") => "video/mp4",
+                    Some("webm") => "video/webm",
+                    _ => "image/png",
+                };
                 let part = reqwest::multipart::Part::bytes(a.bytes.clone())
                     .file_name(a.filename.clone())
-                    .mime_str("image/png")
+                    .mime_str(mime)
                     .context("building attachment part")?;
                 form = form.part(format!("files[{i}]"), part);
             }
@@ -94,6 +99,7 @@ pub fn combined_message(
     summary: &Summary,
     model: &str,
     chart: Option<&str>,
+    highlight: Option<&str>,
 ) -> Value {
     let mut body = vec![
         header_section(s),
@@ -105,6 +111,11 @@ pub fn combined_message(
         // Divider between the overview and the chart.
         body.push(json!({ "type": SEPARATOR, "divider": true, "spacing": 2 }));
         body.push(media(name));
+    }
+    if let Some(clip) = highlight {
+        body.push(json!({ "type": SEPARATOR, "divider": true, "spacing": 2 }));
+        body.push(text("### 🎬 Play of the Game"));
+        body.push(media(clip));
     }
     body.push(footer(Some(model)));
     container_message(s.win, body)
