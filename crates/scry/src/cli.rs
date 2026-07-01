@@ -47,4 +47,9 @@ pub struct Cli {
     /// (containing match.json), using no Riot API. Pair with --summary.
     #[arg(long)]
     pub from_archive: Option<PathBuf>,
+
+    /// Also render and attach charts (gold lead, damage, lobby ranking) as
+    /// embeds. Requires the archive to contain timeline-frames.jsonl.
+    #[arg(long)]
+    pub charts: bool,
 }

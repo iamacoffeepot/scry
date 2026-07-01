@@ -4,6 +4,13 @@ use serde_json::{Value, json};
 use crate::stats::MatchSummary;
 use crate::summary::Summary;
 
+/// A PNG (or other) file attached to a webhook message. Reference it from an
+/// embed with `attachment://<filename>`.
+pub struct Attachment {
+    pub filename: String,
+    pub bytes: Vec<u8>,
+}
+
 /// A Discord incoming webhook the embeds are POSTed to.
 pub struct Webhook {
     url: String,
@@ -18,16 +25,28 @@ impl Webhook {
         }
     }
 
-    /// Post one or more embeds as a single webhook message (a "package").
-    pub async fn post(&self, embeds: &[Value]) -> Result<()> {
-        let resp = self
-            .http
-            .post(&self.url)
-            .json(&json!({ "embeds": embeds }))
-            .send()
-            .await
-            .context("posting to Discord webhook")?;
+    /// Post embeds (and any attachments) as a single webhook message. With
+    /// attachments the request is multipart (`payload_json` + `files[i]`).
+    pub async fn post(&self, embeds: &[Value], attachments: &[Attachment]) -> Result<()> {
+        let payload = json!({ "embeds": embeds });
+        let builder = if attachments.is_empty() {
+            self.http.post(&self.url).json(&payload)
+        } else {
+            let mut form = reqwest::multipart::Form::new().text(
+                "payload_json",
+                serde_json::to_string(&payload).context("serializing webhook payload")?,
+            );
+            for (i, a) in attachments.iter().enumerate() {
+                let part = reqwest::multipart::Part::bytes(a.bytes.clone())
+                    .file_name(a.filename.clone())
+                    .mime_str("image/png")
+                    .context("building attachment part")?;
+                form = form.part(format!("files[{i}]"), part);
+            }
+            self.http.post(&self.url).multipart(form)
+        };
 
+        let resp = builder.send().await.context("posting to Discord webhook")?;
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();

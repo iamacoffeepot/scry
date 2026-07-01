@@ -1,4 +1,5 @@
 mod archive;
+mod charts;
 mod cli;
 mod discord;
 mod riot;
@@ -78,7 +79,7 @@ async fn run(cli: Cli) -> Result<()> {
             tracing::warn!(%match_id, "player not found in match participants; skipping");
             continue;
         };
-        webhook.post(&[discord::stats_embed(&match_summary)]).await?;
+        webhook.post(&[discord::stats_embed(&match_summary)], &[]).await?;
         tracing::info!(%match_id, "posted summary");
     }
 
@@ -122,8 +123,30 @@ async fn post_from_archive(cli: &Cli, dir: &Path) -> Result<()> {
         embeds.push(discord::coach_embed(&summary::parse(&md), &cli.summary_model));
     }
 
+    let mut attachments: Vec<discord::Attachment> = Vec::new();
+    if cli.charts {
+        let charts_dir = dir.join("charts");
+        fs::create_dir_all(&charts_dir)
+            .with_context(|| format!("creating {}", charts_dir.display()))?;
+        let frames = fs::read_to_string(dir.join("timeline-frames.jsonl"))
+            .with_context(|| format!("reading {}", dir.join("timeline-frames.jsonl").display()))?;
+
+        let png_path = charts_dir.join("dashboard.png");
+        charts::dashboard(&game, &frames, &puuid, &png_path)?;
+        let bytes = fs::read(&png_path).with_context(|| format!("reading {}", png_path.display()))?;
+        embeds.push(serde_json::json!({
+            "title": "Match Charts",
+            "color": 0x5865f2u32,
+            "image": { "url": "attachment://dashboard.png" },
+        }));
+        attachments.push(discord::Attachment {
+            filename: "dashboard.png".to_string(),
+            bytes,
+        });
+    }
+
     discord::Webhook::new(cli.webhook.clone())
-        .post(&embeds)
+        .post(&embeds, &attachments)
         .await?;
     tracing::info!(dir = %dir.display(), "posted package from archive");
     Ok(())
