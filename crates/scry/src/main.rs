@@ -134,11 +134,9 @@ async fn post_from_archive(cli: &Cli, dir: &Path) -> Result<()> {
         let png_path = charts_dir.join("dashboard.png");
         charts::dashboard(&game, &frames, &puuid, &png_path)?;
         let bytes = fs::read(&png_path).with_context(|| format!("reading {}", png_path.display()))?;
-        // Section header, then the dashboard as the main embed's bottom image.
-        if let Some(fields) = embeds[0]["fields"].as_array_mut() {
-            fields.push(serde_json::json!({ "name": "Overview", "value": "\u{200b}", "inline": false }));
-        }
-        embeds[0]["image"] = serde_json::json!({ "url": "attachment://dashboard.png" });
+        // Attach the dashboard to the Coach's Breakdown (the last embed).
+        let last = embeds.len() - 1;
+        embeds[last]["image"] = serde_json::json!({ "url": "attachment://dashboard.png" });
         attachments.push(discord::Attachment {
             filename: "dashboard.png".to_string(),
             bytes,
