@@ -16,6 +16,8 @@ pub struct MatchSummary {
     pub profile_url: String,
     pub win: bool,
     pub duration_secs: i64,
+    /// Match start, unix seconds (for Discord's dynamic `<t:…>` timestamp).
+    pub started_at_secs: i64,
     pub kills: i32,
     pub deaths: i32,
     pub assists: i32,
@@ -52,6 +54,7 @@ pub fn summarize(game: &Match, puuid: &str, ctx: &RenderContext) -> Option<Match
     let p = info.participants.iter().find(|p| p.puuid == puuid)?;
 
     let duration_secs = info.game_duration;
+    let started_at_secs = info.game_start_timestamp / 1000;
     // Guard against div-by-zero on remakes / zero-length games.
     let minutes = (duration_secs as f64 / 60.0).max(1.0 / 60.0);
     let cs = p.total_minions_killed + p.neutral_minions_killed;
@@ -85,6 +88,7 @@ pub fn summarize(game: &Match, puuid: &str, ctx: &RenderContext) -> Option<Match
         ),
         win: p.win,
         duration_secs,
+        started_at_secs,
         kills: p.kills,
         deaths: p.deaths,
         assists: p.assists,

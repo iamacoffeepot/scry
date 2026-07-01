@@ -139,8 +139,8 @@ fn header_section(s: &MatchSummary) -> Value {
     json!({
         "type": SECTION,
         "components": [ text(format!(
-            "### {} — {result}\n[{}]({})",
-            s.champion, s.player, s.profile_url
+            "### {} — {result}\n[{}]({})\n-# <t:{}:F> · <t:{}:R>",
+            s.champion, s.player, s.profile_url, s.started_at_secs, s.started_at_secs
         )) ],
         "accessory": { "type": THUMBNAIL, "media": { "url": s.icon_url } },
     })
