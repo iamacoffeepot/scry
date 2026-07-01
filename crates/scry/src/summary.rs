@@ -6,6 +6,16 @@ pub struct Summary {
     pub sections: Vec<(String, String)>,
 }
 
+impl Summary {
+    /// The body of the section whose heading matches `name` (case-insensitive).
+    pub fn section(&self, name: &str) -> Option<&str> {
+        self.sections
+            .iter()
+            .find(|(h, _)| h.eq_ignore_ascii_case(name))
+            .map(|(_, body)| body.as_str())
+    }
+}
+
 /// Split Markdown on `## ` headings. Any text before the first heading is
 /// ignored; section order is preserved.
 pub fn parse(md: &str) -> Summary {

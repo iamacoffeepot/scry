@@ -4,8 +4,8 @@
 #
 # For each account it dumps the latest game (filtered by queue), and if that
 # game hasn't been posted for that player yet (no `.posted-<player>` marker) runs the
-# full pipeline: analyze -> claude -p overview -> post. The archive directory is
-# the dedup state; there is no separate database.
+# full pipeline: analyze -> claude -p overview -> record clips -> post. The
+# archive directory is the dedup state; there is no separate database.
 #
 # Usage:
 #   scripts/poll.sh          # loop forever, polling every $SCRY_INTERVAL seconds
@@ -18,6 +18,7 @@
 #   SCRY_INTERVAL   seconds between passes  (default: 600)
 #   SCRY_QUEUE      default queue id        (default: 420 = ranked solo)
 #   SCRY_SUMMARY_MODEL  footer model label  (default: Claude Opus 4.8)
+#   SCRY_CLIPS      record replay clips 1/0  (default: 1; needs League client)
 #   SCRY_BIN        scry invocation         (default: cargo run --quiet --)
 
 set -uo pipefail
@@ -74,6 +75,12 @@ process_account() {
       > "$dir/overview.md"; then
     log "overview failed for $rid"; return
   fi
+  # Record the Highlight/Lowlight clips the overview chose (best-effort — needs
+  # the League client up; skip with SCRY_CLIPS=0). A failure never blocks posting.
+  if [[ "${SCRY_CLIPS:-1}" == "1" ]]; then
+    scripts/highlight.sh "$dir" || log "clip recording failed for $rid (continuing)"
+  fi
+
   # Post the package; only mark posted on success.
   if $scry --from-archive "$dir" --riot-id "$rid" \
       --summary "$dir/overview.md" --summary-model "$model" --charts --track-lp; then

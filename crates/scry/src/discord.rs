@@ -83,14 +83,22 @@ fn result_color(win: bool) -> u32 {
 }
 
 /// The stats-only message (live posting and the no-overview archive case).
-pub fn stats_message(s: &MatchSummary, chart: Option<&str>, highlight: Option<&str>) -> Value {
+pub fn stats_message(
+    s: &MatchSummary,
+    chart: Option<&str>,
+    highlight: Option<&str>,
+    lowlight: Option<&str>,
+) -> Value {
     let mut body = vec![header_section(s), text(stats_text(s))];
     if let Some(name) = chart {
         body.push(media(name));
     }
+    // No overview here, so the clips carry only their header (no caption).
     if let Some(clip) = highlight {
-        body.push(json!({ "type": SEPARATOR, "divider": true, "spacing": 2 }));
-        body.push(media(clip));
+        clip_block(&mut body, "Highlight", None, clip);
+    }
+    if let Some(clip) = lowlight {
+        clip_block(&mut body, "Lowlight", None, clip);
     }
     body.push(footer(None));
     container_message(s.win, body)
@@ -104,6 +112,7 @@ pub fn combined_message(
     model: &str,
     chart: Option<&str>,
     highlight: Option<&str>,
+    lowlight: Option<&str>,
 ) -> Value {
     let mut body = vec![
         header_section(s),
@@ -116,12 +125,27 @@ pub fn combined_message(
         body.push(json!({ "type": SEPARATOR, "divider": true, "spacing": 2 }));
         body.push(media(name));
     }
+    // Clips get the caption the overview wrote for them (the m:ss + one-liner).
     if let Some(clip) = highlight {
-        body.push(json!({ "type": SEPARATOR, "divider": true, "spacing": 2 }));
-        body.push(media(clip));
+        clip_block(&mut body, "Highlight", summary.section("Highlight"), clip);
+    }
+    if let Some(clip) = lowlight {
+        clip_block(&mut body, "Lowlight", summary.section("Lowlight"), clip);
     }
     body.push(footer(Some(model)));
     container_message(s.win, body)
+}
+
+/// Append a captioned clip: a divider, a bold header + optional caption, then the
+/// video. `caption` is the overview's line for the clip (its m:ss + one-liner).
+fn clip_block(body: &mut Vec<Value>, header: &str, caption: Option<&str>, filename: &str) {
+    body.push(json!({ "type": SEPARATOR, "divider": true, "spacing": 2 }));
+    let content = match caption.map(str::trim) {
+        Some(c) if !c.is_empty() && !c.eq_ignore_ascii_case("none") => format!("**{header}** {c}"),
+        _ => format!("**{header}**"),
+    };
+    body.push(text(content));
+    body.push(media(filename));
 }
 
 /// Wrap child components in an accent-colored container as the whole message.
@@ -217,7 +241,10 @@ fn overview_text(summary: &Summary) -> String {
         out.push_str("\n\n");
     }
     for (heading, body) in &summary.sections {
-        if !heading.eq_ignore_ascii_case("Verdict") {
+        // Verdict leads above; the clip captions render next to their videos.
+        let is_clip = heading.eq_ignore_ascii_case("Highlight")
+            || heading.eq_ignore_ascii_case("Lowlight");
+        if !heading.eq_ignore_ascii_case("Verdict") && !is_clip {
             out.push_str(&format!("**{heading}**\n{}\n\n", truncate(body, 1024)));
         }
     }

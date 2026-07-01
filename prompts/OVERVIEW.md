@@ -156,7 +156,23 @@ characters.
 ## Takeaway
 One specific, actionable thing the player should do differently next game, tied
 to what this game showed. ≤ 300 characters.
+
+## Highlight
+The player's best moment, chosen from the **"Highlight candidates"** list in
+`moments.md`. Begin the line with that candidate's exact `m:ss` timestamp, then
+` — ` and a short, vivid caption (≤ 120 characters) describing the play. Pick the
+most impressive candidate (a multikill or a fight they won and converted beats a
+lone kill). If the candidate list is `(none …)`, write exactly `none`.
+
+## Lowlight
+The player's worst moment, chosen from the **"Lowlight candidates"** list, in the
+same `m:ss — caption` format (≤ 120 characters). Prefer a free death that cost an
+objective. If the candidate list is `(none …)`, write exactly `none`.
 ```
+
+The **Highlight** and **Lowlight** timestamps are used to cut video clips, so
+they must be copied verbatim from a candidate line — never invent a timestamp,
+and never point at a moment that isn't in the candidate lists.
 
 If the game was a remake or ended in an early surrender, say so plainly in
 **Verdict** and keep the remaining sections brief.

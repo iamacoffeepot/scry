@@ -91,7 +91,7 @@ async fn run(cli: Cli) -> Result<()> {
             continue;
         };
         webhook
-            .post(&discord::stats_message(&match_summary, None, None), &[])
+            .post(&discord::stats_message(&match_summary, None, None, None), &[])
             .await?;
         tracing::info!(%match_id, "posted summary");
     }
@@ -145,8 +145,10 @@ fn analyze_archive(riot_id: &str, dir: &Path) -> Result<()> {
         }
     }
 
-    // Write the grounded-facts brief the OVERVIEW prompt consumes.
-    let md = analysis::render_moments_md(&moments, name);
+    // Write the grounded-facts brief the OVERVIEW prompt consumes, including the
+    // Highlight/Lowlight clip candidates it chooses a timestamp from.
+    let (highlights, lowlights) = analysis::clip_candidates(&game, &events, &puuid);
+    let md = analysis::render_moments_md(&moments, &highlights, &lowlights, name);
     let out = dir.join("moments.md");
     fs::write(&out, md).with_context(|| format!("writing {}", out.display()))?;
     println!("\n{} moments -> {}", moments.len(), out.display());
@@ -237,20 +239,22 @@ async fn post_from_archive(cli: &Cli, dir: &Path) -> Result<()> {
         None
     };
 
-    // Embed the highlight clip if one's been recorded into the archive dir
-    // (kept as a first-class artifact next to match.json / moments.md).
-    let highlight_path = dir.join("highlight.mp4");
-    let highlight = if highlight_path.exists() {
-        let bytes = fs::read(&highlight_path)
-            .with_context(|| format!("reading {}", highlight_path.display()))?;
+    // Embed the Highlight/Lowlight clips if they've been recorded into the
+    // archive dir (kept as first-class artifacts next to match.json / moments.md).
+    let mut embed_clip = |name: &'static str| -> Result<Option<&'static str>> {
+        let path = dir.join(name);
+        if !path.exists() {
+            return Ok(None);
+        }
+        let bytes = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
         attachments.push(discord::Attachment {
-            filename: "highlight.mp4".to_string(),
+            filename: name.to_string(),
             bytes,
         });
-        Some("highlight.mp4")
-    } else {
-        None
+        Ok(Some(name))
     };
+    let highlight = embed_clip("highlight.mp4")?;
+    let lowlight = embed_clip("lowlight.mp4")?;
 
     // With an overview, stats + separator + overview are one CV2 container.
     let message = if let Some(summary_path) = cli.summary.as_deref() {
@@ -262,9 +266,10 @@ async fn post_from_archive(cli: &Cli, dir: &Path) -> Result<()> {
             &cli.summary_model,
             chart,
             highlight,
+            lowlight,
         )
     } else {
-        discord::stats_message(&match_summary, chart, highlight)
+        discord::stats_message(&match_summary, chart, highlight, lowlight)
     };
 
     discord::Webhook::new(cli.webhook.clone())

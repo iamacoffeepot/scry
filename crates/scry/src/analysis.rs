@@ -62,7 +62,32 @@ pub fn analyze(game: &Match, events_jsonl: &str, puuid: &str) -> Vec<Moment> {
     let player_id = player.map(|p| p.participant_id);
     let player_team = player.map(|p| team_i32(p.team_id));
 
+    let tl = parse_timeline(events_jsonl, &team_of);
+
+    let mut moments = fight_conversions(&tl.kills, &tl.objectives);
+    if let (Some(pid), Some(pteam)) = (player_id, player_team) {
+        moments.extend(death_moments(&tl.kills, pid, pteam, game));
+        moments.extend(nemesis_moment(&tl.kills, pid, game));
+        moments.extend(objective_absence_moment(&tl.objectives, pid));
+    }
+    moments.extend(dragon_monopoly_moment(&tl.objectives));
+
+    moments.sort_by_key(|m| m.t_ms);
+    moments
+}
+
+/// The timeline reduced to the event kinds the analysis joins over, sorted by time.
+struct Timeline {
+    kills: Vec<KillEv>,
+    specials: Vec<Special>,
+    objectives: Vec<Objective>,
+}
+
+/// Parse the raw event stream into typed kills, special-kills (multikills), and
+/// objectives — the shared front-end for both moment analysis and clip picking.
+fn parse_timeline(events_jsonl: &str, team_of: &[(i32, i32)]) -> Timeline {
     let mut kills: Vec<KillEv> = Vec::new();
+    let mut specials: Vec<Special> = Vec::new();
     let mut objectives: Vec<Objective> = Vec::new();
     for line in events_jsonl.lines() {
         let line = line.trim();
@@ -74,16 +99,35 @@ pub fn analyze(game: &Match, events_jsonl: &str, puuid: &str) -> Vec<Moment> {
         };
         match ev.get("type").and_then(Value::as_str) {
             Some("CHAMPION_KILL") => {
+                let assists = ev
+                    .get("assistingParticipantIds")
+                    .and_then(Value::as_array)
+                    .map(|a| a.iter().filter_map(Value::as_i64).map(|n| n as i32).collect())
+                    .unwrap_or_default();
                 kills.push(KillEv {
                     t: ev.get("timestamp").and_then(Value::as_i64).unwrap_or(0),
                     killer: ev.get("killerId").and_then(Value::as_i64).unwrap_or(0) as i32,
                     victim: ev.get("victimId").and_then(Value::as_i64).unwrap_or(0) as i32,
                     killer_team: team_of_participant(
-                        &team_of,
+                        team_of,
                         ev.get("killerId").and_then(Value::as_i64).unwrap_or(0),
                     ),
+                    assists,
+                    bounty: ev.get("bounty").and_then(Value::as_i64).unwrap_or(0),
+                    shutdown: ev.get("shutdownBounty").and_then(Value::as_i64).unwrap_or(0),
                     x: ev.pointer("/position/x").and_then(Value::as_f64).unwrap_or(0.0),
                     y: ev.pointer("/position/y").and_then(Value::as_f64).unwrap_or(0.0),
+                });
+            }
+            // Only KILL_MULTI carries a multikill length; the rest (first blood,
+            // ace) aren't clip anchors on their own.
+            Some("CHAMPION_SPECIAL_KILL")
+                if ev.get("killType").and_then(Value::as_str) == Some("KILL_MULTI") =>
+            {
+                specials.push(Special {
+                    t: ev.get("timestamp").and_then(Value::as_i64).unwrap_or(0),
+                    killer: ev.get("killerId").and_then(Value::as_i64).unwrap_or(0) as i32,
+                    len: ev.get("multiKillLength").and_then(Value::as_i64).unwrap_or(0),
                 });
             }
             Some("ELITE_MONSTER_KILL") => {
@@ -118,23 +162,23 @@ pub fn analyze(game: &Match, events_jsonl: &str, puuid: &str) -> Vec<Moment> {
     }
 
     kills.sort_by_key(|k| k.t);
+    specials.sort_by_key(|s| s.t);
     objectives.sort_by_key(|o| o.t);
-
-    let mut moments = fight_conversions(&kills, &objectives);
-    if let (Some(pid), Some(pteam)) = (player_id, player_team) {
-        moments.extend(death_moments(&kills, pid, pteam, game));
-        moments.extend(nemesis_moment(&kills, pid, game));
-        moments.extend(objective_absence_moment(&objectives, pid));
+    Timeline {
+        kills,
+        specials,
+        objectives,
     }
-    moments.extend(dragon_monopoly_moment(&objectives));
-
-    moments.sort_by_key(|m| m.t_ms);
-    moments
 }
 
 /// Render the moments as an authoritative grounded-facts brief for the OVERVIEW
 /// prompt: a chronological list plus the aggregate player signals.
-pub fn render_moments_md(moments: &[Moment], player: &str) -> String {
+pub fn render_moments_md(
+    moments: &[Moment],
+    highlights: &[Candidate],
+    lowlights: &[Candidate],
+    player: &str,
+) -> String {
     let mut out = String::new();
     out.push_str("# Grounded analysis (precomputed — authoritative)\n\n");
     out.push_str(&format!(
@@ -171,7 +215,26 @@ pub fn render_moments_md(moments: &[Moment], player: &str) -> String {
             _ => {}
         }
     }
+
+    // Clip anchors: the OVERVIEW prompt picks one of each and echoes its m:ss.
+    out.push_str("\n## Highlight candidates (choose ONE for the Highlight clip; echo its m:ss)\n");
+    render_candidates(&mut out, highlights);
+    out.push_str("\n## Lowlight candidates (choose ONE for the Lowlight clip; echo its m:ss)\n");
+    render_candidates(&mut out, lowlights);
+
     out
+}
+
+/// Render a candidate list as `- m:ss — summary`, or a `(none)` marker so the
+/// prompt knows to write `none` for that clip.
+fn render_candidates(out: &mut String, candidates: &[Candidate]) {
+    if candidates.is_empty() {
+        out.push_str("- (none — no clip-worthy moment)\n");
+        return;
+    }
+    for c in candidates {
+        out.push_str(&format!("- {} — {}\n", mmss(c.t_ms), c.summary));
+    }
 }
 
 // --- fight -> objective conversion ------------------------------------------
@@ -328,6 +391,199 @@ fn dragon_monopoly_moment(objectives: &[Objective]) -> Option<Moment> {
     })
 }
 
+// --- clip candidates --------------------------------------------------------
+
+/// How many candidates of each kind to surface to the OVERVIEW prompt.
+const MAX_CANDIDATES: usize = 3;
+/// A death still counts as "caught before an objective" if the enemy takes one
+/// within this long after it.
+const PUNISH_WINDOW_MS: i64 = 30_000;
+/// After a fight ends, the player must survive this long for it to read as a
+/// clean "walked away" highlight.
+const SURVIVE_AFTER_MS: i64 = 8_000;
+
+/// Compute the ranked Highlight and Lowlight clip candidates for the centered
+/// player, each an exact-timestamp anchor the OVERVIEW prompt picks from.
+pub fn clip_candidates(
+    game: &Match,
+    events_jsonl: &str,
+    puuid: &str,
+) -> (Vec<Candidate>, Vec<Candidate>) {
+    let team_of = team_by_participant(game);
+    let tl = parse_timeline(events_jsonl, &team_of);
+    let Some(player) = game.info.participants.iter().find(|p| p.puuid == puuid) else {
+        return (Vec::new(), Vec::new());
+    };
+    let pid = player.participant_id;
+    let pteam = team_i32(player.team_id);
+    (
+        highlight_candidates(&tl, pid, pteam),
+        lowlight_candidates(&tl, pid, pteam, game),
+    )
+}
+
+/// The player's best plays: fights they were central to, scored on kills/assists,
+/// kill gold, multikills, survival, and whether an objective followed.
+fn highlight_candidates(tl: &Timeline, pid: i32, pteam: i32) -> Vec<Candidate> {
+    let mut scored: Vec<(i64, Candidate)> = Vec::new();
+    for range in cluster_kill_indices(&tl.kills) {
+        let fight = &tl.kills[range];
+        let (start, end) = (fight[0].t, fight[fight.len() - 1].t);
+
+        let pkills: Vec<&KillEv> = fight.iter().filter(|k| k.killer == pid).collect();
+        let passists = fight.iter().filter(|k| k.assists.contains(&pid)).count();
+        let pdeaths = fight.iter().filter(|k| k.victim == pid).count();
+        if pkills.is_empty() && passists == 0 {
+            continue; // nothing of the player's to show
+        }
+
+        let gold: i64 = pkills.iter().map(|k| k.bounty + k.shutdown).sum();
+        let multi = tl
+            .specials
+            .iter()
+            .filter(|s| s.killer == pid && s.t >= start - 1_000 && s.t <= end + 1_000)
+            .map(|s| s.len)
+            .max()
+            .unwrap_or(0);
+        // Survived if not a victim during the fight, nor shortly after it.
+        let survived = !fight.iter().any(|k| k.victim == pid)
+            && !tl
+                .kills
+                .iter()
+                .any(|k| k.victim == pid && k.t > end && k.t <= end + SURVIVE_AFTER_MS);
+        let objective = tl.objectives.iter().find(|o| {
+            o.team == pteam
+                && o.participants.contains(&pid)
+                && o.t >= start
+                && o.t <= end + CONVERSION_WINDOW_MS
+        });
+
+        let mut score = pkills.len() as i64 * 3 + passists as i64 + gold / 100;
+        if multi >= 2 {
+            score += multi * 4;
+        }
+        if survived {
+            score += 2;
+        }
+        score -= pdeaths as i64 * 2;
+        if objective.is_some() {
+            score += 3;
+        }
+        if score <= 0 {
+            continue;
+        }
+
+        // Anchor on the player's first involved kill so the lead-in catches the
+        // setup and a multikill sequence plays out inside the clip.
+        let anchor = fight
+            .iter()
+            .find(|k| k.killer == pid || k.assists.contains(&pid))
+            .map_or(start, |k| k.t);
+
+        let multi_s = if multi >= 2 {
+            format!(", a {}", multi_name(multi))
+        } else {
+            String::new()
+        };
+        let surv_s = if survived {
+            ", walked away"
+        } else if pdeaths > 0 {
+            ", but died in it"
+        } else {
+            ""
+        };
+        let obj_s = objective
+            .map(|o| format!("; {} followed", o.label))
+            .unwrap_or_default();
+        let summary = format!(
+            "you went {}/{}/{} in a fight{multi_s}{surv_s}{obj_s} (+{gold}g)",
+            pkills.len(),
+            pdeaths,
+            passists,
+        );
+        scored.push((score, Candidate { t_ms: anchor, summary }));
+    }
+    top_candidates(scored)
+}
+
+/// The player's worst moments: their deaths, scored on being a free death, the
+/// shutdown gold surrendered, and whether the enemy took an objective off it.
+fn lowlight_candidates(tl: &Timeline, pid: i32, pteam: i32, game: &Match) -> Vec<Candidate> {
+    let enemy = other_team(pteam as i64);
+    let mut scored: Vec<(i64, Candidate)> = Vec::new();
+    for death in tl.kills.iter().filter(|k| k.victim == pid) {
+        let traded = tl.kills.iter().any(|a| {
+            a.killer_team == pteam
+                && a.t >= death.t - TRADE_BEFORE_MS
+                && a.t <= death.t + TRADE_AFTER_MS
+                && dist(a.x, a.y, death.x, death.y) <= TRADE_RADIUS
+        });
+        let punished = tl
+            .objectives
+            .iter()
+            .find(|o| o.team == enemy && o.t >= death.t && o.t <= death.t + PUNISH_WINDOW_MS);
+
+        let mut score = 2 + death.shutdown / 100 + death.bounty / 200;
+        if !traded {
+            score += 2;
+        }
+        if punished.is_some() {
+            score += 4;
+        }
+
+        let killer = champ_of(game, death.killer);
+        let free_s = if traded { "" } else { " (free death)" };
+        let gold_s = if death.shutdown > 0 {
+            format!(", gave up a {}g shutdown", death.shutdown)
+        } else {
+            String::new()
+        };
+        let obj_s = punished
+            .map(|o| format!("; {} followed", o.label))
+            .unwrap_or_default();
+        let summary = format!("caught by {killer}{free_s}{gold_s}{obj_s}");
+        scored.push((score, Candidate { t_ms: death.t, summary }));
+    }
+    top_candidates(scored)
+}
+
+/// Sort `(score, candidate)` pairs descending and keep the top few, in
+/// chronological order so the list reads naturally.
+fn top_candidates(mut scored: Vec<(i64, Candidate)>) -> Vec<Candidate> {
+    scored.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+    scored.truncate(MAX_CANDIDATES);
+    scored.sort_by_key(|(_, c)| c.t_ms);
+    scored.into_iter().map(|(_, c)| c).collect()
+}
+
+/// Group the player's kills the same way fights cluster (by the shared time gap),
+/// returning index ranges into the sorted kill list.
+fn cluster_kill_indices(kills: &[KillEv]) -> Vec<std::ops::Range<usize>> {
+    let mut clusters = Vec::new();
+    if kills.is_empty() {
+        return clusters;
+    }
+    let mut start = 0;
+    for i in 1..kills.len() {
+        if kills[i].t - kills[i - 1].t > FIGHT_GAP_MS {
+            clusters.push(start..i);
+            start = i;
+        }
+    }
+    clusters.push(start..kills.len());
+    clusters
+}
+
+fn multi_name(len: i64) -> &'static str {
+    match len {
+        2 => "double kill",
+        3 => "triple kill",
+        4 => "quadra kill",
+        n if n >= 5 => "pentakill",
+        _ => "multikill",
+    }
+}
+
 // --- types ------------------------------------------------------------------
 
 struct KillEv {
@@ -335,8 +591,29 @@ struct KillEv {
     killer: i32,
     victim: i32,
     killer_team: i32,
+    /// Participant ids credited with an assist on the kill.
+    assists: Vec<i32>,
+    /// Base gold bounty for the kill.
+    bounty: i64,
+    /// Extra shutdown gold (the victim was on a streak/bounty).
+    shutdown: i64,
     x: f64,
     y: f64,
+}
+
+/// A `CHAMPION_SPECIAL_KILL` of type `KILL_MULTI` — a multikill worth clipping.
+struct Special {
+    t: i64,
+    killer: i32,
+    len: i64,
+}
+
+/// A candidate clip moment: an exact game-time anchor plus a grounded one-liner
+/// the OVERVIEW prompt chooses from (and echoes the timestamp of) for a clip.
+#[derive(Debug, Clone)]
+pub struct Candidate {
+    pub t_ms: i64,
+    pub summary: String,
 }
 
 struct Kill {
