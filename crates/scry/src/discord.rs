@@ -137,8 +137,13 @@ fn media(filename: &str) -> Value {
 fn header_section(s: &MatchSummary) -> Value {
     let result = if s.win { "Victory" } else { "Defeat" };
     // Title is the player; champion/side and date are secondary rows beneath.
+    let queue = if s.queue.is_empty() {
+        String::new()
+    } else {
+        format!("{} · ", s.queue)
+    };
     let mut content = format!(
-        "-# <t:{}:F> · <t:{}:R>\n### [{}]({}) — {result}\n{} · {} side",
+        "-# <t:{}:F> · <t:{}:R>\n### [{}]({}) — {result}\n{} · {queue}{} side",
         s.started_at_secs, s.started_at_secs, s.player, s.profile_url, s.champion, s.side
     );
     if let Some(r) = &s.rank {

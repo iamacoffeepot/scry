@@ -15,6 +15,8 @@ pub struct MatchSummary {
     pub icon_url: String,
     pub profile_url: String,
     pub win: bool,
+    /// Human queue name (e.g. "Ranked Solo"); empty if unrecognized.
+    pub queue: &'static str,
     /// "Blue" or "Red" — the side the player was on.
     pub side: &'static str,
     pub duration_secs: i64,
@@ -69,6 +71,7 @@ pub fn summarize(game: &Match, puuid: &str, ctx: &RenderContext) -> Option<Match
 
     let duration_secs = info.game_duration;
     let started_at_secs = info.game_start_timestamp / 1000;
+    let queue = queue_name(info.queue_id.0);
     let side = match p.team_id {
         riven::consts::Team::BLUE => "Blue",
         riven::consts::Team::RED => "Red",
@@ -106,6 +109,7 @@ pub fn summarize(game: &Match, puuid: &str, ctx: &RenderContext) -> Option<Match
             urlencoding::encode(&tag_line),
         ),
         win: p.win,
+        queue,
         side,
         duration_secs,
         started_at_secs,
@@ -129,4 +133,21 @@ pub fn summarize(game: &Match, puuid: &str, ctx: &RenderContext) -> Option<Match
 
 fn non_empty(s: Option<String>) -> Option<String> {
     s.filter(|v| !v.is_empty())
+}
+
+/// A human queue name for the common queue ids; empty for the rest.
+fn queue_name(id: u16) -> &'static str {
+    match id {
+        400 => "Normal Draft",
+        420 => "Ranked Solo",
+        430 => "Normal Blind",
+        440 => "Ranked Flex",
+        450 => "ARAM",
+        480 => "Swiftplay",
+        490 => "Quickplay",
+        700 => "Clash",
+        900 => "ARURF",
+        1700 | 1710 => "Arena",
+        _ => "",
+    }
 }
