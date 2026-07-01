@@ -64,12 +64,32 @@ if [[ -z "$hl_ts" && -z "$ll_ts" ]]; then
 fi
 echo "clips: highlight=${hl_ts:-none} lowlight=${ll_ts:-none}"
 
-# --- load THIS game's replay once (a stale one may be up) -------------------
-pkill -9 -f "LoL/Game/League" 2>/dev/null; sleep 4
-curl -sk --max-time 10 -u "riot:$pass" -X POST "$lcu/lol-replays/v1/rofls/$gid/download/graceful" -H "Content-Type: application/json" -d '{}' >/dev/null
-curl -sk --max-time 10 -u "riot:$pass" -X POST "$lcu/lol-replays/v1/rofls/$gid/watch" -H "Content-Type: application/json" -d '{}' >/dev/null
-for _ in $(seq 1 30); do [[ "$(curl -sk --max-time 3 -o /dev/null -w '%{http_code}' "$rp/playback" 2>/dev/null)" == "200" ]] && break; sleep 3; done
-[[ "$(curl -sk --max-time 3 -o /dev/null -w '%{http_code}' "$rp/playback" 2>/dev/null)" == "200" ]] || { echo "replay API never came up"; exit 1; }
+# --- load THIS game's replay (a stale one may be up) ------------------------
+# The .rofl download verifies asynchronously (metadata state: checking -> watch);
+# launching while still "checking" no-ops the watch and the replay never comes
+# up. And the replay subsystem occasionally wedges. So: download, wait for the
+# state to reach "watch", launch, poll playback — and retry the whole load once.
+replay_state() {
+  curl -sk --max-time 5 -u "riot:$pass" "$lcu/lol-replays/v1/metadata/$gid" \
+    | python3 -c "import sys,json;print(json.load(sys.stdin).get('state',''))" 2>/dev/null
+}
+playback_up() { [[ "$(curl -sk --max-time 3 -o /dev/null -w '%{http_code}' "$rp/playback" 2>/dev/null)" == "200" ]]; }
+
+load_replay() {
+  pkill -9 -f "LoL/Game/League" 2>/dev/null; sleep 4
+  curl -sk --max-time 10 -u "riot:$pass" -X POST "$lcu/lol-replays/v1/rofls/$gid/download/graceful" -H "Content-Type: application/json" -d '{}' >/dev/null
+  # Wait for the download to finish verifying (up to ~60s) before launching.
+  for _ in $(seq 1 20); do [[ "$(replay_state)" == "watch" ]] && break; sleep 3; done
+  curl -sk --max-time 10 -u "riot:$pass" -X POST "$lcu/lol-replays/v1/rofls/$gid/watch" -H "Content-Type: application/json" -d '{}' >/dev/null
+  # Poll for the in-game replay API to come up (up to ~45s).
+  for _ in $(seq 1 15); do playback_up && return 0; sleep 3; done
+  playback_up
+}
+
+if ! load_replay; then
+  echo "replay didn't come up; retrying load once"
+  load_replay || { echo "replay API never came up"; exit 1; }
+fi
 
 # Clean shot: HUD off, full vision.
 curl -sk --max-time 5 -X POST "$rp/render" -H "Content-Type: application/json" -d '{"interfaceAll":false,"fogOfWar":false}' -o /dev/null
