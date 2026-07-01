@@ -3,6 +3,7 @@ mod archive;
 mod charts;
 mod cli;
 mod discord;
+mod rank;
 mod riot;
 mod stats;
 mod summary;
@@ -173,8 +174,34 @@ async fn post_from_archive(cli: &Cli, dir: &Path) -> Result<()> {
         fallback_name: name,
         fallback_tag: tag,
     };
-    let match_summary = stats::summarize(&game, &puuid, &ctx)
+    let mut match_summary = stats::summarize(&game, &puuid, &ctx)
         .ok_or_else(|| anyhow!("could not summarize {} from {}", cli.riot_id, dir.display()))?;
+
+    // LP tracking: fetch current rank and diff against the last snapshot.
+    if cli.track_lp
+        && let Some(queue) = rank::queue_type(game.info.queue_id)
+    {
+        let region = game.info.platform_id.to_lowercase();
+        let client = riot::Client::new(&cli.api_key, &region)?;
+        match client.rank(&puuid, queue).await {
+            Ok(Some(current)) => {
+                let snap = cli
+                    .state_dir
+                    .join(format!("{}_{}.json", puuid, game.info.queue_id.0));
+                let delta = rank::read_previous(&snap).map(|prev| current.ladder_value() - prev);
+                if let Err(e) = rank::write_snapshot(&snap, &current) {
+                    tracing::warn!(error = %e, "writing LP snapshot failed");
+                }
+                match_summary.rank = Some(stats::RankInfo {
+                    label: current.label(),
+                    lp: current.lp,
+                    delta,
+                });
+            }
+            Ok(None) => tracing::info!("player is unranked in this queue; no LP line"),
+            Err(e) => tracing::warn!(error = %e, "rank fetch failed; skipping LP line"),
+        }
+    }
 
     // Render the dashboard first so the message can reference the attachment.
     let mut attachments: Vec<discord::Attachment> = Vec::new();

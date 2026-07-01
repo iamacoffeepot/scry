@@ -76,7 +76,7 @@ process_account() {
   fi
   # Post the package; only mark posted on success.
   if $scry --from-archive "$dir" --riot-id "$rid" \
-      --summary "$dir/overview.md" --summary-model "$model" --charts; then
+      --summary "$dir/overview.md" --summary-model "$model" --charts --track-lp; then
     touch "$marker"
     log "posted $rid"
   else

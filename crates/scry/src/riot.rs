@@ -104,6 +104,28 @@ impl Client {
     }
 
     /// Most-recent match IDs for a PUUID, newest first.
+    /// The player's current standing in `queue`, or `None` if unranked there.
+    pub async fn rank(
+        &self,
+        puuid: &str,
+        queue: riven::consts::QueueType,
+    ) -> Result<Option<crate::rank::Rank>> {
+        let entries = self
+            .api
+            .league_v4()
+            .get_league_entries_by_puuid(self.platform, puuid)
+            .await
+            .context("league-v4 entries request failed")?;
+        Ok(entries
+            .into_iter()
+            .find(|e| e.queue_type == queue)
+            .map(|e| crate::rank::Rank {
+                tier: e.tier.unwrap_or(riven::consts::Tier::UNRANKED),
+                division: e.rank.unwrap_or(riven::consts::Division::I),
+                lp: e.league_points,
+            }))
+    }
+
     pub async fn recent_match_ids(
         &self,
         puuid: &str,

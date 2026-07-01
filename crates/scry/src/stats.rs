@@ -15,6 +15,8 @@ pub struct MatchSummary {
     pub icon_url: String,
     pub profile_url: String,
     pub win: bool,
+    /// "Blue" or "Red" — the side the player was on.
+    pub side: &'static str,
     pub duration_secs: i64,
     /// Match start, unix seconds (for Discord's dynamic `<t:…>` timestamp).
     pub started_at_secs: i64,
@@ -26,6 +28,18 @@ pub struct MatchSummary {
     pub damage_to_champions: i32,
     pub gold: i32,
     pub vision: VisionStats,
+    /// Ranked standing + LP delta, when LP tracking is on (ranked games only).
+    pub rank: Option<RankInfo>,
+}
+
+/// Ranked standing to show in the header, with the LP change since last game.
+pub struct RankInfo {
+    /// e.g. "Gold II" or "Master".
+    pub label: String,
+    pub lp: i32,
+    /// LP gained (+) or lost (-) since the previous snapshot; `None` if this is
+    /// the first game we've catalogued for the account (no baseline yet).
+    pub delta: Option<i32>,
 }
 
 /// Warding / vision block for the stats embed.
@@ -55,6 +69,11 @@ pub fn summarize(game: &Match, puuid: &str, ctx: &RenderContext) -> Option<Match
 
     let duration_secs = info.game_duration;
     let started_at_secs = info.game_start_timestamp / 1000;
+    let side = match p.team_id {
+        riven::consts::Team::BLUE => "Blue",
+        riven::consts::Team::RED => "Red",
+        _ => "?",
+    };
     // Guard against div-by-zero on remakes / zero-length games.
     let minutes = (duration_secs as f64 / 60.0).max(1.0 / 60.0);
     let cs = p.total_minions_killed + p.neutral_minions_killed;
@@ -87,6 +106,7 @@ pub fn summarize(game: &Match, puuid: &str, ctx: &RenderContext) -> Option<Match
             urlencoding::encode(&tag_line),
         ),
         win: p.win,
+        side,
         duration_secs,
         started_at_secs,
         kills: p.kills,
@@ -96,6 +116,7 @@ pub fn summarize(game: &Match, puuid: &str, ctx: &RenderContext) -> Option<Match
         cs_per_min: cs as f64 / minutes,
         damage_to_champions: p.total_damage_dealt_to_champions,
         gold: p.gold_earned,
+        rank: None,
         vision: VisionStats {
             vision_score: p.vision_score,
             vision_per_min: p.vision_score as f64 / minutes,

@@ -58,6 +58,15 @@ pub struct Cli {
     #[arg(long)]
     pub charts: bool,
 
+    /// With --from-archive on a ranked game: fetch the player's current rank
+    /// (league-v4) and show the LP delta since the last snapshot. Needs the API.
+    #[arg(long)]
+    pub track_lp: bool,
+
+    /// Directory holding per-account LP snapshots (used with --track-lp).
+    #[arg(long, default_value = "state/lp")]
+    pub state_dir: PathBuf,
+
     /// Instead of posting, run the causal analysis over a dumped match
     /// directory and print the classified moments. Uses no Riot API.
     #[arg(long)]
