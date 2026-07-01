@@ -99,7 +99,12 @@ poll_all() {
     if [[ -z "$rid" || -z "$region" ]]; then
       log "skipping malformed line: $line"; continue
     fi
-    process_account "$rid" "$region" "$queue"
+    # A line may list several queues (e.g. "420,440") — scan each.
+    IFS=',' read -ra queues <<< "$queue"
+    for q in "${queues[@]}"; do
+      q="$(echo "$q" | xargs)"
+      [[ -n "$q" ]] && process_account "$rid" "$region" "$q"
+    done
   done < "$accounts"
 }
 

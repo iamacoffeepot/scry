@@ -4,7 +4,7 @@
 # - region is a platform code: na1, euw1, eun1, kr, br1, jp1, ...
 # - queue is optional; defaults to $SCRY_QUEUE or 420 (ranked solo). Common ids:
 #     420 ranked solo · 440 ranked flex · 400 normal draft · 430 blind · 450 ARAM
-#   Use "all" for no queue filter.
+#   List several with commas to scan each (e.g. "420,440"). Use "all" for none.
 # - Blank lines and lines starting with # are ignored.
 #
 # Copy this to scripts/accounts.txt and edit.
