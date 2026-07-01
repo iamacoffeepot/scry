@@ -17,10 +17,10 @@ use riven::consts::Team;
 use riven::models::match_v5::Match;
 use serde_json::Value;
 
-/// Logical (post-downscale) canvas.
-const WIDTH: u32 = 1000;
-const HEIGHT: u32 = 940;
-const TOP_H: u32 = 420;
+/// Logical (post-downscale) canvas — 3:2 (w:h).
+const WIDTH: u32 = 1500;
+const HEIGHT: u32 = 1000;
+const TOP_H: u32 = 440;
 /// Supersampling factor — render this many times larger, then downscale.
 const SS: u32 = 2;
 

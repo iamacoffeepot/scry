@@ -75,10 +75,7 @@ pub fn stats_embed(s: &MatchSummary) -> Value {
         "fields": [
             { "name": "KDA", "value": format!("{}/{}/{} ({:.2})", s.kills, s.deaths, s.assists, s.kda()), "inline": true },
             { "name": "CS", "value": format!("{} ({:.1}/min)", s.cs, s.cs_per_min), "inline": true },
-            { "name": "Damage", "value": thousands(s.damage_to_champions), "inline": true },
-            { "name": "Gold", "value": thousands(s.gold), "inline": true },
             { "name": "Duration", "value": format!("{mins}:{secs:02}"), "inline": true },
-            { "name": "Vision", "value": format!("{} ({:.2}/min)", s.vision.vision_score, s.vision.vision_per_min), "inline": true },
             { "name": "Wards", "value": format!(
                 "{} placed · {} killed · {} control",
                 s.vision.wards_placed, s.vision.wards_killed, s.vision.control_wards_bought),
@@ -123,17 +120,4 @@ fn truncate(s: &str, max: usize) -> String {
         let kept: String = s.chars().take(max.saturating_sub(1)).collect();
         format!("{kept}…")
     }
-}
-
-/// Group digits with commas: `18420` -> `"18,420"`.
-fn thousands(n: i32) -> String {
-    let digits = n.unsigned_abs().to_string();
-    let mut out = String::new();
-    for (i, ch) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(ch);
-    }
-    if n < 0 { format!("-{out}") } else { out }
 }

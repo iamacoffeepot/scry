@@ -21,15 +21,11 @@ pub struct MatchSummary {
     pub assists: i32,
     pub cs: i32,
     pub cs_per_min: f64,
-    pub damage_to_champions: i32,
-    pub gold: i32,
     pub vision: VisionStats,
 }
 
-/// Warding / vision block — the headline "advanced" stat for v1.
+/// Warding block for the stats embed (ward counts aren't shown in the charts).
 pub struct VisionStats {
-    pub vision_score: i32,
-    pub vision_per_min: f64,
     pub wards_placed: i32,
     pub wards_killed: i32,
     pub control_wards_bought: i32,
@@ -90,11 +86,7 @@ pub fn summarize(game: &Match, puuid: &str, ctx: &RenderContext) -> Option<Match
         assists: p.assists,
         cs,
         cs_per_min: cs as f64 / minutes,
-        damage_to_champions: p.total_damage_dealt_to_champions,
-        gold: p.gold_earned,
         vision: VisionStats {
-            vision_score: p.vision_score,
-            vision_per_min: p.vision_score as f64 / minutes,
             wards_placed: p.wards_placed,
             wards_killed: p.wards_killed,
             control_wards_bought: p.vision_wards_bought_in_game,
