@@ -136,9 +136,10 @@ fn media(filename: &str) -> Value {
 /// Title + player link, with the summoner icon as the section's thumbnail.
 fn header_section(s: &MatchSummary) -> Value {
     let result = if s.win { "Victory" } else { "Defeat" };
+    // Title is the player; champion/side and date are secondary rows beneath.
     let mut content = format!(
-        "-# <t:{}:F> · <t:{}:R>\n### {} — {result}\n[{}]({}) · {} side",
-        s.started_at_secs, s.started_at_secs, s.champion, s.player, s.profile_url, s.side
+        "### [{}]({}) — {result}\n-# <t:{}:F> · <t:{}:R>\n{} · {} side",
+        s.player, s.profile_url, s.started_at_secs, s.started_at_secs, s.champion, s.side
     );
     if let Some(r) = &s.rank {
         let delta = match r.delta {

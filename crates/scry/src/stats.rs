@@ -94,7 +94,7 @@ pub fn summarize(game: &Match, puuid: &str, ctx: &RenderContext) -> Option<Match
         non_empty(p.riot_id_tagline.clone()).unwrap_or_else(|| ctx.fallback_tag.to_owned());
 
     Some(MatchSummary {
-        player: format!("{game_name} #{tag_line}"),
+        player: format!("{game_name}#{tag_line}"),
         champion: champion_name,
         icon_url: format!(
             "https://raw.communitydragon.org/latest/plugins/rcp-be-lol-game-data/global/default/v1/champion-icons/{champion_id}.png"
