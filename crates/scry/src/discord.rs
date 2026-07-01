@@ -137,8 +137,8 @@ fn media(filename: &str) -> Value {
 fn header_section(s: &MatchSummary) -> Value {
     let result = if s.win { "Victory" } else { "Defeat" };
     let mut content = format!(
-        "### {} — {result}\n[{}]({}) · {} side",
-        s.champion, s.player, s.profile_url, s.side
+        "-# <t:{}:F> · <t:{}:R>\n### {} — {result}\n[{}]({}) · {} side",
+        s.started_at_secs, s.started_at_secs, s.champion, s.player, s.profile_url, s.side
     );
     if let Some(r) = &s.rank {
         let delta = match r.delta {
@@ -147,10 +147,6 @@ fn header_section(s: &MatchSummary) -> Value {
         };
         content.push_str(&format!("\n**{}** · {} LP{delta}", r.label, r.lp));
     }
-    content.push_str(&format!(
-        "\n-# <t:{}:F> · <t:{}:R>",
-        s.started_at_secs, s.started_at_secs
-    ));
     json!({
         "type": SECTION,
         "components": [ text(content) ],
