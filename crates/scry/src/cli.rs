@@ -33,9 +33,9 @@ pub struct Cli {
     #[arg(long)]
     pub dump: Option<PathBuf>,
 
-    /// Pair the posted match with a coach summary (Markdown from the COACH
-    /// prompt): its ## sections become a second embed posted alongside the
-    /// stats embed.
+    /// Pair the posted match with an overview summary (Markdown from the
+    /// OVERVIEW prompt): its ## sections become a second embed posted alongside
+    /// the stats embed.
     #[arg(long)]
     pub summary: Option<PathBuf>,
 

@@ -1,4 +1,4 @@
-//! Parse a COACH-prompt Markdown summary into its `## ` sections so the embed
+//! Parse an OVERVIEW-prompt Markdown summary into its `## ` sections so the embed
 //! layer can map them onto Discord fields.
 
 /// An ordered list of `(heading, body)` sections parsed from the coach Markdown.
