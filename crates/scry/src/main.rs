@@ -134,11 +134,8 @@ async fn post_from_archive(cli: &Cli, dir: &Path) -> Result<()> {
         let png_path = charts_dir.join("dashboard.png");
         charts::dashboard(&game, &frames, &puuid, &png_path)?;
         let bytes = fs::read(&png_path).with_context(|| format!("reading {}", png_path.display()))?;
-        embeds.push(serde_json::json!({
-            "title": "Match Charts",
-            "color": 0x5865f2u32,
-            "image": { "url": "attachment://dashboard.png" },
-        }));
+        // Attach the dashboard as the main (stats) embed's bottom image.
+        embeds[0]["image"] = serde_json::json!({ "url": "attachment://dashboard.png" });
         attachments.push(discord::Attachment {
             filename: "dashboard.png".to_string(),
             bytes,
