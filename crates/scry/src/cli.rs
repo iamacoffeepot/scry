@@ -52,4 +52,9 @@ pub struct Cli {
     /// embeds. Requires the archive to contain timeline-frames.jsonl.
     #[arg(long)]
     pub charts: bool,
+
+    /// Instead of posting, run the causal analysis over a dumped match
+    /// directory and print the classified moments. Uses no Riot API.
+    #[arg(long)]
+    pub analyze: Option<PathBuf>,
 }

@@ -1,3 +1,4 @@
+mod analysis;
 mod archive;
 mod charts;
 mod cli;
@@ -29,6 +30,11 @@ async fn run(cli: Cli) -> Result<()> {
     // Post a packaged embed from a dumped match record — no Riot API calls.
     if let Some(dir) = cli.from_archive.as_deref() {
         return post_from_archive(&cli, dir).await;
+    }
+
+    // Run the causal analysis over a dumped match and print the moments.
+    if let Some(dir) = cli.analyze.as_deref() {
+        return analyze_archive(dir);
     }
 
     let region = cli
@@ -83,6 +89,31 @@ async fn run(cli: Cli) -> Result<()> {
         tracing::info!(%match_id, "posted summary");
     }
 
+    Ok(())
+}
+
+/// Run the causal analysis over a dumped match directory and print the
+/// classified moments. Uses only the archived files — no Riot API.
+fn analyze_archive(dir: &Path) -> Result<()> {
+    let raw = fs::read_to_string(dir.join("match.json"))
+        .with_context(|| format!("reading {}", dir.join("match.json").display()))?;
+    let game: Match = serde_json::from_str(&raw).context("parsing match.json into match-v5")?;
+    let events = fs::read_to_string(dir.join("timeline-events.jsonl"))
+        .with_context(|| format!("reading {}", dir.join("timeline-events.jsonl").display()))?;
+
+    let moments = analysis::analyze(&game, &events);
+    println!("{} moments\n", moments.len());
+    for m in &moments {
+        let secs = m.t_ms / 1000;
+        let tag = match m.kind {
+            analysis::MomentKind::FightConversion { converted: true, .. } => "fight ✓",
+            analysis::MomentKind::FightConversion { converted: false, .. } => "fight ✗",
+        };
+        println!("{:>3}:{:02}  [{tag}]  {}", secs / 60, secs % 60, m.summary);
+        for e in &m.evidence {
+            println!("           · {e}");
+        }
+    }
     Ok(())
 }
 
