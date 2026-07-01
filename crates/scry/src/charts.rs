@@ -219,6 +219,7 @@ fn draw_gold(
     chart
         .configure_mesh()
         .label_style(caption(17))
+        .x_label_offset(px(6))
         .axis_style(GRID)
         .bold_line_style(GRID)
         .light_line_style(BG)
@@ -234,8 +235,33 @@ fn draw_gold(
         ShapeStyle::from(GREEN).stroke_width(px(3)),
     ))?;
 
-    // Kill markers on the line: (minute, gold-diff at that minute, ally?).
-    let mut kills: Vec<(f64, f64, bool)> = Vec::new();
+    // Per-player colors, grouped by team hue (cool = allies, warm = enemies).
+    const ALLY_PAL: [(u8, u8, u8); 5] = [
+        (59, 130, 246), (34, 197, 94), (6, 182, 212), (99, 102, 241), (20, 184, 166),
+    ];
+    const ENEMY_PAL: [(u8, u8, u8); 5] = [
+        (239, 68, 68), (249, 115, 22), (234, 179, 8), (236, 72, 153), (219, 39, 119),
+    ];
+    let mut pcolor: std::collections::HashMap<i32, RGBColor> = std::collections::HashMap::new();
+    let mut legend: Vec<(RGBColor, String, bool)> = Vec::new();
+    let (mut ai, mut ei) = (0usize, 0usize);
+    for p in &game.info.participants {
+        let is_ally = p.team_id == player_team;
+        let (r, g, b) = if is_ally {
+            let c = ALLY_PAL[ai.min(4)];
+            ai += 1;
+            c
+        } else {
+            let c = ENEMY_PAL[ei.min(4)];
+            ei += 1;
+            c
+        };
+        let color = RGBColor(r, g, b);
+        pcolor.insert(p.participant_id, color);
+        legend.push((color, spaced_name(&p.champion_name), is_ally));
+    }
+
+    // Solid kill markers on the line, colored by the killer.
     for line in events_jsonl.lines().filter(|l| !l.trim().is_empty()) {
         let v: Value = serde_json::from_str(line)?;
         if v["type"] != "CHAMPION_KILL" {
@@ -243,22 +269,38 @@ fn draw_gold(
         }
         let killer = v["killerId"].as_i64().unwrap_or(0) as i32;
         if !(1..=10).contains(&killer) {
-            continue; // executions / tower kills have no champion killer
+            continue;
         }
         let minute = v["timestamp"].as_f64().unwrap_or(0.0) / 60_000.0;
-        let ally = team_of.get(&killer) == Some(&player_team);
-        kills.push((minute, line_y_at(&pts, minute), ally));
+        let color = *pcolor.get(&killer).unwrap_or(&GREEN);
+        chart.draw_series(std::iter::once(Circle::new(
+            (minute, line_y_at(&pts, minute)),
+            px(5) as i32,
+            color.filled(),
+        )))?;
     }
-    // Draw large->small so the solid centers stay on top of every halo.
-    for (radius, alpha) in [(px(13), 0.16f64), (px(8), 0.4), (px(4), 1.0)] {
-        for (x, y, ally) in &kills {
-            let base = if *ally { ALLY } else { ENEMY };
-            chart.draw_series(std::iter::once(Circle::new(
-                (*x, *y),
-                radius as i32,
-                base.mix(alpha).filled(),
-            )))?;
-        }
+
+    // Player legend in the empty upper region: allies column, enemies column.
+    let top_y = max_abs * 0.92;
+    let step = max_abs * 0.15;
+    let (mut arow, mut erow) = (0.0f64, 0.0f64);
+    for (color, name, is_ally) in &legend {
+        let (sx, tx, row) = if *is_ally {
+            let r = arow;
+            arow += 1.0;
+            (max_min * 0.015, max_min * 0.03, r)
+        } else {
+            let r = erow;
+            erow += 1.0;
+            (max_min * 0.40, max_min * 0.415, r)
+        };
+        let y = top_y - step * row;
+        chart.draw_series(std::iter::once(Circle::new((sx, y), px(6) as i32, color.filled())))?;
+        chart.draw_series(std::iter::once(Text::new(
+            name.clone(),
+            (tx, y),
+            caption(14).pos(Pos::new(HPos::Left, VPos::Center)),
+        )))?;
     }
 
     draw_title(area, "Gold Difference", 28, title_x)?;
@@ -306,6 +348,7 @@ fn draw_damage(area: &Area, game: &Match, puuid: &str) -> Drawn {
         .configure_mesh()
         .disable_y_mesh()
         .label_style(caption(17))
+        .x_label_offset(px(6))
         .axis_style(GRID)
         .bold_line_style(BG)
         .light_line_style(BG)
@@ -406,6 +449,7 @@ fn draw_matchup(area: &Area, game: &Match, puuid: &str) -> Drawn {
         .disable_x_mesh()
         .disable_y_mesh()
         .label_style(caption(17))
+        .x_label_offset(px(6))
         .axis_style(GRID)
         .x_labels(metrics.len())
         .y_labels(0)
