@@ -151,6 +151,13 @@ fn analyze_archive(riot_id: &str, dir: &Path) -> Result<()> {
     let md = analysis::render_moments_md(&moments, &highlights, &lowlights, name);
     let out = dir.join("moments.md");
     fs::write(&out, md).with_context(|| format!("writing {}", out.display()))?;
+
+    // Sidecar the per-candidate clip windows (seek + duration) keyed by m:ss, so
+    // highlight.sh records a window sized to each play rather than a flat length.
+    let clips = analysis::render_clips_json(&highlights, &lowlights);
+    fs::write(dir.join("clips.json"), clips)
+        .with_context(|| format!("writing {}", dir.join("clips.json").display()))?;
+
     println!("\n{} moments -> {}", moments.len(), out.display());
     Ok(())
 }

@@ -13,7 +13,7 @@
 
 use riven::consts::Team;
 use riven::models::match_v5::Match;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 /// A classified, already-grounded moment ready to hand to the OVERVIEW prompt.
 #[derive(Debug, Clone)]
@@ -473,12 +473,18 @@ fn highlight_candidates(tl: &Timeline, pid: i32, pteam: i32) -> Vec<Candidate> {
             continue;
         }
 
-        // Anchor on the player's first involved kill so the lead-in catches the
-        // setup and a multikill sequence plays out inside the clip.
-        let anchor = fight
+        // The clip spans the player's own action: from their first involved kill
+        // to their last, plus lead-in/tail — so a whole multikill sequence fits.
+        let involved: Vec<i64> = fight
             .iter()
-            .find(|k| k.killer == pid || k.assists.contains(&pid))
-            .map_or(start, |k| k.t);
+            .filter(|k| k.killer == pid || k.assists.contains(&pid))
+            .map(|k| k.t)
+            .collect();
+        let anchor = *involved.first().unwrap_or(&start);
+        let last_involved = *involved.last().unwrap_or(&anchor);
+        let seek_s = (anchor / 1000 - CLIP_LEAD_S).max(0);
+        let span_s = (last_involved - anchor) / 1000;
+        let dur_s = (span_s + CLIP_LEAD_S + CLIP_TAIL_S).min(CLIP_MAX_S);
 
         let multi_s = if multi >= 2 {
             format!(", a {}", multi_name(multi))
@@ -501,7 +507,7 @@ fn highlight_candidates(tl: &Timeline, pid: i32, pteam: i32) -> Vec<Candidate> {
             pdeaths,
             passists,
         );
-        scored.push((score, Candidate { t_ms: anchor, summary }));
+        scored.push((score, Candidate { t_ms: anchor, seek_s, dur_s, summary }));
     }
     top_candidates(scored)
 }
@@ -542,9 +548,23 @@ fn lowlight_candidates(tl: &Timeline, pid: i32, pteam: i32, game: &Match) -> Vec
             .map(|o| format!("; {} followed", o.label))
             .unwrap_or_default();
         let summary = format!("caught by {killer}{free_s}{gold_s}{obj_s}");
-        scored.push((score, Candidate { t_ms: death.t, summary }));
+        // A death is a single instant: lead-in, the death, a short tail.
+        let seek_s = (death.t / 1000 - CLIP_LEAD_S).max(0);
+        let dur_s = CLIP_LEAD_S + 9;
+        scored.push((score, Candidate { t_ms: death.t, seek_s, dur_s, summary }));
     }
     top_candidates(scored)
+}
+
+/// Render the clip windows as JSON keyed by the same `m:ss` the OVERVIEW prompt
+/// echoes, so `highlight.sh` can look up the exact seek + duration for the
+/// timestamp it was handed: `{"22:06": {"seek": 1319, "dur": 32}, ...}`.
+pub fn render_clips_json(highlights: &[Candidate], lowlights: &[Candidate]) -> String {
+    let mut map = serde_json::Map::new();
+    for c in highlights.iter().chain(lowlights) {
+        map.insert(mmss(c.t_ms), json!({ "seek": c.seek_s, "dur": c.dur_s }));
+    }
+    serde_json::to_string_pretty(&Value::Object(map)).unwrap_or_else(|_| "{}".to_string())
 }
 
 /// Sort `(score, candidate)` pairs descending and keep the top few, in
@@ -610,11 +630,22 @@ struct Special {
 
 /// A candidate clip moment: an exact game-time anchor plus a grounded one-liner
 /// the OVERVIEW prompt chooses from (and echoes the timestamp of) for a clip.
+/// `seek_s`/`dur_s` describe the video window to record so the whole play fits.
 #[derive(Debug, Clone)]
 pub struct Candidate {
     pub t_ms: i64,
+    /// Game-second the clip should start at (lead-in already included).
+    pub seek_s: i64,
+    /// Clip length in seconds — sized to the fight span, capped.
+    pub dur_s: i64,
     pub summary: String,
 }
+
+/// Seconds of lead-in before the play and tail after it, and the hard cap on a
+/// clip's length (keeps the transcode under Discord's 10MB attachment limit).
+const CLIP_LEAD_S: i64 = 7;
+const CLIP_TAIL_S: i64 = 6;
+const CLIP_MAX_S: i64 = 32;
 
 struct Kill {
     t: i64,
