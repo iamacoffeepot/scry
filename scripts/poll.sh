@@ -145,18 +145,22 @@ client_phase() {
 CLIP_MAX_TRIES="${CLIP_MAX_TRIES:-15}"
 clips_pass() {
   [[ "${SCRY_CLIPS:-1}" == "1" ]] || return
-  # Idle only: None (in client) or Lobby. In game / champ select / queue: later.
-  case "$(client_phase)" in
-    *None*|*Lobby*) : ;;
-    *) return ;;
-  esac
   local ridf dir rid tries
-  for ridf in "$archive"/*/*/.clip-rid; do
-    [[ -e "$ridf" ]] || continue
+  # Newest game first (sort -r on the paths = descending game id): the latest
+  # post gets its clips promptly, and a stuck/broken old replay can't starve the
+  # newer ones behind it. Attempt each; a failure `continue`s to the next rather
+  # than blocking the whole pass. Stop after one SUCCESS (keeps polling snappy).
+  for ridf in $(ls -1 "$archive"/*/*/.clip-rid 2>/dev/null | sort -r); do
     dir="$(dirname "$ridf")"
     [[ -f "$dir/.clips-done" ]] && continue
     [[ -f "$dir/.message-id" && -f "$dir/overview.md" ]] || continue
     rid="$(cat "$ridf")"; [[ -n "$rid" ]] || continue
+
+    # Only drive a replay when the client is idle (None/Lobby). Re-checked every
+    # iteration — a pass can take minutes and the user may start a game. If the
+    # client is down/unreachable client_phase is empty, so we bail here WITHOUT
+    # burning a try (that's the common "League is closed" case).
+    case "$(client_phase)" in *None*|*Lobby*) : ;; *) return ;; esac
 
     tries="$(cat "$dir/.clips-tries" 2>/dev/null || echo 0)"
     if (( tries >= CLIP_MAX_TRIES )); then
@@ -167,20 +171,20 @@ clips_pass() {
 
     log "recording clips for $rid -> $dir (try $((tries + 1)))"
     if ! scripts/highlight.sh "$dir"; then
-      log "clips not ready for $rid (will retry)"; return
+      log "clips not ready for $rid (will retry)"; continue
     fi
     if [[ ! -f "$dir/highlight.mp4" && ! -f "$dir/lowlight.mp4" ]]; then
-      log "no clips produced for $rid (will retry)"; return
+      log "no clips produced for $rid (will retry)"; continue
     fi
     # Edit the existing message to attach the clips (reuses post-time LP; no API).
     if $scry --from-archive "$dir" --riot-id "$rid" \
         --summary "$dir/overview.md" --summary-model "$model" --no-overview --edit; then
       touch "$dir/.clips-done"
       log "clips attached for $rid"
+      return  # one successful clip per pass; the next pass takes the next game
     else
-      log "clip edit failed for $rid (will retry)"
+      log "clip edit failed for $rid (will retry)"; continue
     fi
-    return  # one game per pass: re-check idle before the next
   done
 }
 
