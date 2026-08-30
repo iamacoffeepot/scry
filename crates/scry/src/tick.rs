@@ -16,7 +16,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow};
 
 use crate::cli::Cli;
 use crate::journal::{ClipAttempt, ClipsAbandoned, ClipsAttached, Journal};
@@ -249,6 +249,8 @@ fn post_cli(cli: &Cli, riot_id: &str, dir: &Path, edit: bool) -> Cli {
         no_clips: cli.no_clips,
         clip_max_tries: cli.clip_max_tries,
         clips_per_pass: cli.clips_per_pass,
+        journal_dump: false,
+        abandon_clips: Vec::new(),
     }
 }
 
@@ -304,7 +306,10 @@ fn parse_accounts(path: &Path, default_queue: Option<u32>) -> Result<Vec<Account
 pub fn import_legacy_state(cli: &Cli) -> Result<()> {
     let journal = Journal::open(&cli.journal)?;
     if !journal.is_empty()? {
-        bail!("journal {} already has events; refusing to import twice", cli.journal.display());
+        // Already imported: the remaining legacy value is post-time LP lines
+        // written before game_posted carried them. Backfill just those, as
+        // idempotent re-appends (last post wins in the fold).
+        return backfill_rank_lines(cli, &journal);
     }
     let accounts = parse_accounts(&cli.accounts, None)?;
 
@@ -316,6 +321,8 @@ pub fn import_legacy_state(cli: &Cli) -> Result<()> {
         };
         let message_id = std::fs::read_to_string(dir.join(".message-id")).unwrap_or_default().trim().to_string();
         let queue_id = read_queue_id(&dir).unwrap_or(0);
+        let rank: Option<crate::stats::RankInfo> =
+            std::fs::read_to_string(dir.join(".rank.json")).ok().and_then(|json| serde_json::from_str(&json).ok());
 
         for account in &accounts {
             if dir.join(format!(".posted-{}", slug(&account.riot_id))).exists() {
@@ -325,6 +332,7 @@ pub fn import_legacy_state(cli: &Cli) -> Result<()> {
                     riot_id: account.riot_id.clone(),
                     queue_id,
                     message_id: message_id.clone(),
+                    rank: rank.clone(),
                 })?;
                 games += 1;
             }
@@ -372,6 +380,66 @@ pub fn import_legacy_state(cli: &Cli) -> Result<()> {
     }
 
     tracing::info!(games, baselines, journal = %cli.journal.display(), "imported legacy state");
+    Ok(())
+}
+
+/// Mark clip jobs abandoned for explicitly named match ids — games whose
+/// replay aged out of the patch, or whose post was removed. Idempotent: a
+/// finished job is skipped.
+pub fn abandon_clips(cli: &Cli) -> Result<()> {
+    let journal = Journal::open(&cli.journal)?;
+    let projection = journal.fold()?;
+    for match_id in &cli.abandon_clips {
+        let (platform, game_id) = split_match_id(match_id)?;
+        match projection.clip_job(platform, game_id) {
+            Some(job) if job.done => tracing::info!(%match_id, "clip job already finished; skipping"),
+            job => {
+                let tries = job.map_or(0, |j| j.tries);
+                journal.append(&ClipsAbandoned { platform: platform.to_string(), game_id, tries })?;
+                tracing::info!(%match_id, "clip job abandoned");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Re-append `game_posted` (same identity, plus the legacy `.rank.json` LP
+/// line) for already-posted games the journal has no rank line for — so a
+/// clip-attach edit reproduces the post-time LP line without the file.
+fn backfill_rank_lines(cli: &Cli, journal: &Journal) -> Result<()> {
+    let projection = journal.fold()?;
+    let mut backfilled = 0usize;
+    for dir in archive_dirs(&cli.archive)? {
+        let platform = dir.parent().and_then(|p| p.file_name()).and_then(|n| n.to_str()).unwrap_or("").to_string();
+        let Some(game_id) = dir.file_name().and_then(|n| n.to_str()).and_then(|n| n.parse::<u64>().ok()) else {
+            continue;
+        };
+        if projection.rank_line(&platform, game_id).is_some() {
+            continue;
+        }
+        let Some(message_id) = projection.message_id(&platform, game_id) else {
+            continue;
+        };
+        let Some(rank) = std::fs::read_to_string(dir.join(".rank.json"))
+            .ok()
+            .and_then(|json| serde_json::from_str::<crate::stats::RankInfo>(&json).ok())
+        else {
+            continue;
+        };
+        let Some(job) = projection.pending_clips().into_iter().find(|(p, g, _)| *p == platform && *g == game_id) else {
+            continue; // A finished clip job never edits again; skip.
+        };
+        journal.append(&crate::journal::GamePosted {
+            platform,
+            game_id,
+            riot_id: job.2.riot_id.clone(),
+            queue_id: read_queue_id(&dir).unwrap_or(0),
+            message_id: message_id.to_string(),
+            rank: Some(rank),
+        })?;
+        backfilled += 1;
+    }
+    tracing::info!(backfilled, "journal already imported; backfilled legacy rank lines for pending clip edits");
     Ok(())
 }
 

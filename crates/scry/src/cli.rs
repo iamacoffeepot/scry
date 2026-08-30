@@ -123,6 +123,17 @@ pub struct Cli {
     /// idle. Recording is serial and real-time, so this bounds a pass's length.
     #[arg(long, env = "SCRY_CLIPS_PER_PASS", default_value_t = 5)]
     pub clips_per_pass: u32,
+
+    /// Print every journal event as one JSON line (seq, at_millis, kind,
+    /// payload) — the journal's inspection surface.
+    #[arg(long)]
+    pub journal_dump: bool,
+
+    /// Mark clip jobs abandoned for these match ids (e.g. NA1_5592463865):
+    /// operational hygiene for games whose replay aged out of the patch or
+    /// whose post was removed.
+    #[arg(long, num_args = 1.., value_name = "MATCH_ID")]
+    pub abandon_clips: Vec<String>,
 }
 
 impl Cli {

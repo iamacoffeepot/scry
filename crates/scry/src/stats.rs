@@ -36,7 +36,9 @@ pub struct MatchSummary {
 }
 
 /// Ranked standing to show in the header, with the LP change since last game.
-#[derive(Serialize, Deserialize)]
+/// Also rides `scry.journal.game_posted` (a trailing optional in the storage
+/// shape) so an edit re-renders the post-time LP line without re-fetching.
+#[derive(aether_data::Schema, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct RankInfo {
     /// e.g. "Gold II" or "Master".
     pub label: String,

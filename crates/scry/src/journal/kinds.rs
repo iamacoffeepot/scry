@@ -3,7 +3,37 @@
 //! a field was added still decodes the record and a future field lands as a
 //! trailing optional.
 
+use aether_data::storage::{RecordReader, RecordWriter, fold_path_segment};
+use aether_data::{StorageError, StorageLeaves};
 use serde::{Deserialize, Serialize};
+
+use crate::stats::RankInfo;
+
+// Nested storage containers hand-roll their leaves (the derive covers only
+// the root record) — the same pattern aether-bloomery uses for its nested
+// view structs. Field names feed the content hash, so renaming one is a
+// schema change.
+impl StorageLeaves for RankInfo {
+    fn contribute(&self, carry: u64, depth: u32, sink: &mut RecordWriter) -> Result<(), StorageError> {
+        self.label.contribute(fold_path_segment(carry, b"label", depth), depth + 1, sink)?;
+        self.lp.contribute(fold_path_segment(carry, b"lp", depth), depth + 1, sink)?;
+        self.delta.contribute(fold_path_segment(carry, b"delta", depth), depth + 1, sink)
+    }
+
+    fn assemble(carry: u64, depth: u32, source: &mut RecordReader) -> Result<Self, StorageError> {
+        Ok(Self {
+            label: String::assemble(fold_path_segment(carry, b"label", depth), depth + 1, source)?,
+            lp: i32::assemble(fold_path_segment(carry, b"lp", depth), depth + 1, source)?,
+            delta: Option::<i32>::assemble(fold_path_segment(carry, b"delta", depth), depth + 1, source)?,
+        })
+    }
+
+    fn is_absent(carry: u64, depth: u32, source: &RecordReader) -> bool {
+        String::is_absent(fold_path_segment(carry, b"label", depth), depth + 1, source)
+            && i32::is_absent(fold_path_segment(carry, b"lp", depth), depth + 1, source)
+            && Option::<i32>::is_absent(fold_path_segment(carry, b"delta", depth), depth + 1, source)
+    }
+}
 
 /// A game's package was posted to Discord for one tracked player.
 ///
@@ -24,6 +54,10 @@ pub struct GamePosted {
     /// Discord message id, so the clip pass can edit the post later. Empty
     /// when the webhook returned none (clips then can't attach).
     pub message_id: String,
+    /// The LP line rendered at post time, so the clip-attach edit reproduces
+    /// it without a Riot call. Trailing optional (ADR-0059): rows written
+    /// before this field decode with it absent.
+    pub rank: Option<RankInfo>,
 }
 
 /// The player's ranked standing at post time (league-v4). The LP delta on a

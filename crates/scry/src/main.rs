@@ -42,6 +42,14 @@ async fn run(cli: Cli) -> Result<()> {
         return tick::import_legacy_state(&cli);
     }
 
+    // Journal inspection / clip-job hygiene.
+    if cli.journal_dump {
+        return journal::Journal::open(&cli.journal)?.dump();
+    }
+    if !cli.abandon_clips.is_empty() {
+        return tick::abandon_clips(&cli);
+    }
+
     // Post a packaged embed from a dumped match record — no Riot API calls.
     if let Some(dir) = cli.from_archive.as_deref() {
         return post_from_archive(&cli, dir).await;
@@ -192,18 +200,19 @@ async fn post_from_archive(cli: &Cli, dir: &Path) -> Result<()> {
     let mut match_summary = stats::summarize(&game, &puuid, &ctx)
         .ok_or_else(|| anyhow!("could not summarize {riot_id} from {}", dir.display()))?;
 
-    // The journal records this post/edit; the tick pass folds it for dedup,
-    // clip jobs, and LP baselines.
+    // The journal records this post/edit and is the only poller state: dedup,
+    // clip jobs, message ids, LP baselines, and post-time LP lines all fold
+    // out of it.
     let journal = journal::Journal::open(&cli.journal)?;
+    let state = journal.fold()?;
+    let (platform, game_id) = tick::split_match_id(&game.metadata.match_id)
+        .with_context(|| format!("archive {} has a malformed match id", dir.display()))?;
 
-    // LP tracking. On an --edit we must NOT re-fetch or re-diff: the snapshot
-    // was already advanced at post time, so a second diff would read zero. Reuse
-    // the rank/LP computed then, persisted in <dir>/.rank.json.
-    let rank_path = dir.join(".rank.json");
+    // LP tracking. On an --edit we must NOT re-fetch or re-diff: the baseline
+    // already advanced at post time, so a second diff would read zero. Reuse
+    // the LP line the post's game_posted event recorded.
     if cli.edit {
-        if let Ok(json) = fs::read_to_string(&rank_path) {
-            match_summary.rank = serde_json::from_str(&json).ok();
-        }
+        match_summary.rank = state.rank_line(platform, game_id).cloned();
     } else if cli.track_lp
         && let Some(queue) = rank::queue_type(game.info.queue_id)
     {
@@ -214,7 +223,7 @@ async fn post_from_archive(cli: &Cli, dir: &Path) -> Result<()> {
                 // The journal's last rank_observed for this (puuid, queue) is
                 // the baseline; this observation becomes the next one.
                 let queue_id = u32::from(game.info.queue_id.0);
-                let delta = journal.fold()?.previous_ladder(&puuid, queue_id).map(|prev| current.ladder_value() - prev);
+                let delta = state.previous_ladder(&puuid, queue_id).map(|prev| current.ladder_value() - prev);
                 journal.append(&journal::RankObserved {
                     puuid: puuid.clone(),
                     riot_id: riot_id.to_string(),
@@ -223,12 +232,7 @@ async fn post_from_archive(cli: &Cli, dir: &Path) -> Result<()> {
                     label: current.label(),
                     lp: current.lp,
                 })?;
-                let info = stats::RankInfo { label: current.label(), lp: current.lp, delta };
-                // Persist so a later --edit renders the identical LP line.
-                if let Ok(json) = serde_json::to_string(&info) {
-                    let _ = fs::write(&rank_path, json);
-                }
-                match_summary.rank = Some(info);
+                match_summary.rank = Some(stats::RankInfo { label: current.label(), lp: current.lp, delta });
             }
             Ok(None) => tracing::info!("player is unranked in this queue; no LP line"),
             Err(e) => tracing::warn!(error = %format!("{e:#}"), "rank fetch failed; skipping LP line"),
@@ -285,23 +289,20 @@ async fn post_from_archive(cli: &Cli, dir: &Path) -> Result<()> {
     };
 
     let webhook = discord::Webhook::new(cli.webhook.clone());
-    let mid_path = dir.join(".message-id");
-    let (platform, game_id) = tick::split_match_id(&game.metadata.match_id)
-        .with_context(|| format!("archive {} has a malformed match id", dir.display()))?;
     if cli.edit {
-        // Attach the clips to the message we already posted for this archive.
-        let message_id = fs::read_to_string(&mid_path)
-            .with_context(|| format!("reading {} (was this archive posted?)", mid_path.display()))?;
-        webhook.edit(message_id.trim(), &message, &attachments).await?;
+        // Attach the clips to the message the journal recorded at post time.
+        let message_id = state.message_id(platform, game_id).with_context(|| {
+            format!("no posted message in the journal for {} (was this archive posted?)", dir.display())
+        })?;
+        webhook.edit(message_id, &message, &attachments).await?;
         journal.append(&journal::ClipsAttached { platform: platform.to_string(), game_id })?;
         tracing::info!(dir = %dir.display(), "edited posted message with clips");
     } else {
-        // Initial post: record the message id so the clip pass can edit it.
+        // Initial post: the game_posted event carries the message id the clip
+        // pass edits later, plus the rendered LP line the edit reproduces.
         let message_id = webhook.post(&message, &attachments).await?.unwrap_or_default();
         if message_id.is_empty() {
             tracing::warn!("webhook did not return a message id; clips can't be attached later");
-        } else {
-            fs::write(&mid_path, &message_id).with_context(|| format!("writing {}", mid_path.display()))?;
         }
         journal.append(&journal::GamePosted {
             platform: platform.to_string(),
@@ -309,6 +310,7 @@ async fn post_from_archive(cli: &Cli, dir: &Path) -> Result<()> {
             riot_id: riot_id.to_string(),
             queue_id: u32::from(game.info.queue_id.0),
             message_id,
+            rank: match_summary.rank.clone(),
         })?;
         tracing::info!(dir = %dir.display(), "posted package from archive");
     }

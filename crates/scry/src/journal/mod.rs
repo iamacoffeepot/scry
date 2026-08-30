@@ -68,6 +68,28 @@ impl Journal {
         Ok(count == 0)
     }
 
+    /// Print every event as one JSON line: `{seq, at_millis, kind, payload}`.
+    /// An unknown kind prints with a null payload rather than failing.
+    pub fn dump(&self) -> Result<()> {
+        let mut stmt = self.conn.prepare("SELECT seq, at_millis, kind, payload FROM events ORDER BY seq")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?, row.get::<_, Vec<u8>>(3)?))
+        })?;
+        for row in rows {
+            let (seq, at_millis, kind, payload) = row?;
+            let payload = match kind.as_str() {
+                GamePosted::NAME => serde_json::to_value(decode::<GamePosted>(&payload)?)?,
+                RankObserved::NAME => serde_json::to_value(decode::<RankObserved>(&payload)?)?,
+                ClipAttempt::NAME => serde_json::to_value(decode::<ClipAttempt>(&payload)?)?,
+                ClipsAttached::NAME => serde_json::to_value(decode::<ClipsAttached>(&payload)?)?,
+                ClipsAbandoned::NAME => serde_json::to_value(decode::<ClipsAbandoned>(&payload)?)?,
+                _ => serde_json::Value::Null,
+            };
+            println!("{}", serde_json::json!({ "seq": seq, "at_millis": at_millis, "kind": kind, "payload": payload }));
+        }
+        Ok(())
+    }
+
     /// Fold every event, in append order, into the current state.
     pub fn fold(&self) -> Result<Projection> {
         let mut stmt = self.conn.prepare("SELECT kind, payload FROM events ORDER BY seq")?;
@@ -129,6 +151,8 @@ pub struct Projection {
     newest: HashMap<(String, u32), u64>,
     /// Last observed ladder value per (puuid, queue_id).
     ranks: HashMap<(String, u32), i32>,
+    /// Post-time LP line per posted game (last post wins).
+    rank_lines: HashMap<(String, u64), crate::stats::RankInfo>,
 }
 
 impl Projection {
@@ -139,6 +163,9 @@ impl Projection {
         self.posted.insert((event.platform, key.1, event.riot_id.to_lowercase()));
         if !event.message_id.is_empty() {
             self.message_ids.insert(key.clone(), event.message_id);
+        }
+        if let Some(rank) = event.rank {
+            self.rank_lines.insert(key.clone(), rank);
         }
         let job = self.clips.entry(key).or_default();
         // A re-post moves the clip perspective (last poster wins) but never
@@ -197,6 +224,16 @@ impl Projection {
             .max()
     }
 
+    /// The clip job for one posted game, if any.
+    pub fn clip_job(&self, platform: &str, game_id: u64) -> Option<&ClipJob> {
+        self.clips.get(&(platform.to_string(), game_id))
+    }
+
+    /// The LP line rendered when this game posted, if any.
+    pub fn rank_line(&self, platform: &str, game_id: u64) -> Option<&crate::stats::RankInfo> {
+        self.rank_lines.get(&(platform.to_string(), game_id))
+    }
+
     /// The previous ladder value for (puuid, queue), the LP-delta baseline.
     pub fn previous_ladder(&self, puuid: &str, queue_id: u32) -> Option<i32> {
         self.ranks.get(&(puuid.to_string(), queue_id)).copied()
@@ -214,6 +251,7 @@ mod tests {
             riot_id: riot_id.to_string(),
             queue_id: 420,
             message_id: message_id.to_string(),
+            rank: None,
         }
     }
 
