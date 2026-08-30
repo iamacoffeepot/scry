@@ -156,9 +156,21 @@ fn game_end_millis(match_json: &serde_json::Value) -> i64 {
 async fn clips_pass(cli: &Cli, journal: &Journal) -> Result<()> {
     let mut recorded = 0;
     let projection = journal.fold()?;
+    let client_patch = client_replay_patch().await;
     for (platform, game_id, job) in projection.pending_clips() {
         let dir = cli.archive.join(&platform).join(game_id.to_string());
         if projection.message_id(&platform, game_id).is_none() || !dir.join("overview.md").exists() {
+            continue;
+        }
+
+        // Replays are patch-gated: a game from a previous patch can never
+        // play again, so abandon immediately rather than burning the retry
+        // budget on four-minute "replay API never came up" timeouts.
+        if let (Some(client), Some(game)) = (client_patch.as_deref(), game_patch(&dir))
+            && client != game
+        {
+            tracing::info!(%platform, game_id, game_patch = %game, client_patch = %client, "replay predates the current patch; abandoning clips");
+            journal.append(&ClipsAbandoned { platform, game_id, tries: job.tries })?;
             continue;
         }
 
@@ -199,9 +211,36 @@ async fn clips_pass(cli: &Cli, journal: &Journal) -> Result<()> {
     Ok(())
 }
 
+/// The client's replay patch as `major.minor` (`/lol-replays/v1/configuration`
+/// `gameVersion`), or `None` when the client is down/unreachable.
+async fn client_replay_patch() -> Option<String> {
+    let body = lcu_get("/lol-replays/v1/configuration").await?;
+    let config: serde_json::Value = serde_json::from_str(&body).ok()?;
+    major_minor(config.get("gameVersion")?.as_str()?)
+}
+
+/// A game's patch as `major.minor`, from its archived `match.json`.
+fn game_patch(dir: &Path) -> Option<String> {
+    let raw = std::fs::read_to_string(dir.join("match.json")).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    major_minor(value.pointer("/info/gameVersion")?.as_str()?)
+}
+
+/// `16.16.804.9184` -> `16.16` (replay compatibility is per patch line).
+fn major_minor(version: &str) -> Option<String> {
+    let mut parts = version.split('.');
+    Some(format!("{}.{}", parts.next()?, parts.next()?))
+}
+
 /// The League client's gameflow phase, or `None` when the client is
 /// down/unreachable.
 async fn client_phase() -> Option<String> {
+    lcu_get("/lol-gameflow/v1/gameflow-phase").await
+}
+
+/// GET one LCU endpoint through the lockfile-published local port; `None`
+/// when the client is down or the request fails.
+async fn lcu_get(path: &str) -> Option<String> {
     let lockfile = std::fs::read_to_string("/Applications/League of Legends.app/Contents/LoL/lockfile").ok()?;
     let mut fields = lockfile.trim().split(':');
     let (port, password) = (fields.nth(2)?, fields.next()?);
@@ -211,7 +250,7 @@ async fn client_phase() -> Option<String> {
         .build()
         .ok()?;
     client
-        .get(format!("https://127.0.0.1:{port}/lol-gameflow/v1/gameflow-phase"))
+        .get(format!("https://127.0.0.1:{port}{path}"))
         .basic_auth("riot", Some(password))
         .send()
         .await
