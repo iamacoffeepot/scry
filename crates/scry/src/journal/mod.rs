@@ -22,7 +22,9 @@ use rusqlite::Connection;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-pub use kinds::{ClipAttempt, ClipsAbandoned, ClipsAttached, GamePosted, RankObserved};
+pub use kinds::{
+    AccountRenamed, AccountResolved, ClipAttempt, ClipsAbandoned, ClipsAttached, GamePosted, RankObserved,
+};
 
 /// The append-only event log.
 pub struct Journal {
@@ -83,6 +85,8 @@ impl Journal {
                 ClipAttempt::NAME => serde_json::to_value(decode::<ClipAttempt>(&payload)?)?,
                 ClipsAttached::NAME => serde_json::to_value(decode::<ClipsAttached>(&payload)?)?,
                 ClipsAbandoned::NAME => serde_json::to_value(decode::<ClipsAbandoned>(&payload)?)?,
+                AccountResolved::NAME => serde_json::to_value(decode::<AccountResolved>(&payload)?)?,
+                AccountRenamed::NAME => serde_json::to_value(decode::<AccountRenamed>(&payload)?)?,
                 _ => serde_json::Value::Null,
             };
             println!("{}", serde_json::json!({ "seq": seq, "at_millis": at_millis, "kind": kind, "payload": payload }));
@@ -91,25 +95,53 @@ impl Journal {
     }
 
     /// Fold every event, in append order, into the current state.
+    ///
+    /// Two passes: the first collects the name→PUUID pins (account_resolved
+    /// events plus any game_posted that carries its puuid), the second applies
+    /// events with every name-keyed row re-keyed to its permanent identity —
+    /// so rows written before the puuid field, or before a rename, land under
+    /// the same identity as everything after.
     pub fn fold(&self) -> Result<Projection> {
         let mut stmt = self.conn.prepare("SELECT kind, payload FROM events ORDER BY seq")?;
-        let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)))?;
+        let rows: Vec<(String, Vec<u8>)> = stmt
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)))?
+            .collect::<Result<_, _>>()?;
 
         let mut projection = Projection::default();
-        for row in rows {
-            let (kind, payload) = row?;
+        for (kind, payload) in &rows {
             match kind.as_str() {
-                GamePosted::NAME => projection.apply_posted(decode::<GamePosted>(&payload)?),
-                RankObserved::NAME => projection.apply_rank(decode::<RankObserved>(&payload)?),
-                ClipAttempt::NAME => projection.apply_attempt(&decode::<ClipAttempt>(&payload)?),
+                AccountResolved::NAME => {
+                    let e = decode::<AccountResolved>(payload)?;
+                    projection.pins.insert(e.riot_id.to_lowercase(), e.puuid);
+                }
+                GamePosted::NAME => {
+                    let e = decode::<GamePosted>(payload)?;
+                    if let Some(puuid) = e.puuid {
+                        projection.pins.insert(e.riot_id.to_lowercase(), puuid);
+                    }
+                }
+                _ => {}
+            }
+        }
+        for (kind, payload) in &rows {
+            let payload = payload.as_slice();
+            match kind.as_str() {
+                GamePosted::NAME => {
+                    let e = decode::<GamePosted>(payload)?;
+                    projection.apply_posted(e);
+                }
+                RankObserved::NAME => projection.apply_rank(decode::<RankObserved>(payload)?),
+                ClipAttempt::NAME => projection.apply_attempt(&decode::<ClipAttempt>(payload)?),
                 ClipsAttached::NAME => {
-                    let e = decode::<ClipsAttached>(&payload)?;
+                    let e = decode::<ClipsAttached>(payload)?;
                     projection.apply_terminal(&e.platform, e.game_id);
                 }
                 ClipsAbandoned::NAME => {
-                    let e = decode::<ClipsAbandoned>(&payload)?;
+                    let e = decode::<ClipsAbandoned>(payload)?;
                     projection.apply_terminal(&e.platform, e.game_id);
                 }
+                // Consumed by the pin pass above; audit-only here.
+                AccountResolved::NAME | AccountRenamed::NAME => {}
                 other => tracing::debug!(kind = other, "skipping journal event from a newer writer"),
             }
         }
@@ -146,9 +178,12 @@ pub struct Projection {
     message_ids: HashMap<(String, u64), String>,
     /// Clip job state per posted game.
     clips: HashMap<(String, u64), ClipJob>,
-    /// Newest posted game id per (riot_id lowercase, queue_id) — the floor
-    /// below which older window entries are history, not news.
-    newest: HashMap<(String, u32), u64>,
+    /// Newest posted game per (identity, queue_id) — the floor below which
+    /// older window entries are history, not news.
+    newest: HashMap<(String, u32), (String, u64)>,
+    /// Name (lowercase) → permanent PUUID pins; the identity every name-keyed
+    /// query re-keys through, so a rename never orphans state.
+    pins: HashMap<String, String>,
     /// Last observed ladder value per (puuid, queue_id).
     ranks: HashMap<(String, u32), i32>,
     /// Post-time LP line per posted game (last post wins).
@@ -156,11 +191,21 @@ pub struct Projection {
 }
 
 impl Projection {
+    /// The permanent identity a display name resolves to: its PUUID pin, or
+    /// the lowercased name itself when nothing has pinned it yet.
+    fn ident(&self, riot_id: &str) -> String {
+        let lower = riot_id.to_lowercase();
+        self.pins.get(&lower).cloned().unwrap_or(lower)
+    }
+
     fn apply_posted(&mut self, event: GamePosted) {
+        let ident = event.puuid.clone().unwrap_or_else(|| self.ident(&event.riot_id));
         let key = (event.platform.clone(), event.game_id);
-        let floor = self.newest.entry((event.riot_id.to_lowercase(), event.queue_id)).or_insert(0);
-        *floor = (*floor).max(event.game_id);
-        self.posted.insert((event.platform, key.1, event.riot_id.to_lowercase()));
+        let floor = self.newest.entry((ident.clone(), event.queue_id)).or_insert_with(|| (event.platform.clone(), 0));
+        if event.game_id > floor.1 {
+            *floor = (event.platform.clone(), event.game_id);
+        }
+        self.posted.insert((event.platform, key.1, ident));
         if !event.message_id.is_empty() {
             self.message_ids.insert(key.clone(), event.message_id);
         }
@@ -188,10 +233,10 @@ impl Projection {
         self.clips.entry((platform.to_string(), game_id)).or_default().done = true;
     }
 
-    /// Was this game already posted for this player? (Riot IDs compare
-    /// case-insensitively.)
+    /// Was this game already posted for this player? The name re-keys through
+    /// its PUUID pin, so the answer survives renames.
     pub fn is_posted(&self, platform: &str, game_id: u64, riot_id: &str) -> bool {
-        self.posted.contains(&(platform.to_string(), game_id, riot_id.to_lowercase()))
+        self.posted.contains(&(platform.to_string(), game_id, self.ident(riot_id)))
     }
 
     /// The Discord message id recorded for a posted game.
@@ -216,12 +261,17 @@ impl Projection {
     /// The newest game id already posted for this player — in one queue, or
     /// across all queues when `queue_id` is `None` (an `all` watch line).
     pub fn newest_posted(&self, riot_id: &str, queue_id: Option<u32>) -> Option<u64> {
-        let rid = riot_id.to_lowercase();
+        let ident = self.ident(riot_id);
         self.newest
             .iter()
-            .filter(|((r, q), _)| *r == rid && queue_id.is_none_or(|want| *q == want))
-            .map(|(_, id)| *id)
+            .filter(|((r, q), _)| *r == ident && queue_id.is_none_or(|want| *q == want))
+            .map(|(_, (_, id))| *id)
             .max()
+    }
+
+    /// The pinned PUUID for a display name, if any pass recorded one.
+    pub fn puuid_of(&self, riot_id: &str) -> Option<&str> {
+        self.pins.get(&riot_id.to_lowercase()).map(String::as_str)
     }
 
     /// The clip job for one posted game, if any.
@@ -252,6 +302,7 @@ mod tests {
             queue_id: 420,
             message_id: message_id.to_string(),
             rank: None,
+            puuid: None,
         }
     }
 
@@ -278,7 +329,8 @@ mod tests {
 
         // Reopen from disk: the fold sees everything the first handle wrote.
         drop(journal);
-        let projection = Journal::open(&path).unwrap().fold().unwrap();
+        let journal2 = Journal::open(&path).unwrap();
+        let projection = journal2.fold().unwrap();
 
         assert!(projection.is_posted("NA1", 100, "moon#132"), "case-insensitive dedup");
         assert!(!projection.is_posted("NA1", 102, "Moon#132"));
@@ -291,6 +343,14 @@ mod tests {
         assert_eq!(projection.newest_posted("MOON#132", Some(420)), Some(100));
         assert_eq!(projection.newest_posted("moon#132", Some(440)), None);
         assert_eq!(projection.newest_posted("himles#9267", None), Some(101));
+
+        // Identity: a pin re-keys name-era rows to the PUUID, so after a
+        // rename the NEW name still sees the old posts and floors.
+        journal2.append(&AccountResolved { riot_id: "Moon#132".into(), puuid: "p-moon".into() }).unwrap();
+        journal2.append(&AccountResolved { riot_id: "Moonlight#NEW".into(), puuid: "p-moon".into() }).unwrap();
+        let renamed = journal2.fold().unwrap();
+        assert!(renamed.is_posted("NA1", 100, "Moonlight#NEW"), "rename keeps dedup");
+        assert_eq!(renamed.newest_posted("Moonlight#NEW", Some(420)), Some(100), "rename keeps the floor");
 
         std::fs::remove_dir_all(&dir).ok();
     }

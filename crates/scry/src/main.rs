@@ -64,7 +64,11 @@ async fn run(cli: Cli) -> Result<()> {
     let client = riot::Client::new(&cli.api_key, region)?;
 
     let riot_id = cli.require_riot_id()?;
-    let puuid = client.resolve_puuid(riot_id).await.with_context(|| format!("resolving Riot ID {riot_id}"))?;
+    let puuid = client
+        .resolve_puuid(riot_id)
+        .await
+        .with_context(|| format!("resolving Riot ID {riot_id}"))?
+        .ok_or_else(|| anyhow!("no account found for `{riot_id}`"))?;
 
     let match_ids = client.recent_match_ids(&puuid, cli.count, cli.queue).await?;
     if match_ids.is_empty() {
@@ -311,6 +315,7 @@ async fn post_from_archive(cli: &Cli, dir: &Path) -> Result<()> {
             queue_id: u32::from(game.info.queue_id.0),
             message_id,
             rank: match_summary.rank.clone(),
+            puuid: Some(puuid.clone()),
         })?;
         tracing::info!(dir = %dir.display(), "posted package from archive");
     }

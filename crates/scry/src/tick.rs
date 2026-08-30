@@ -16,10 +16,12 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 
 use crate::cli::Cli;
-use crate::journal::{ClipAttempt, ClipsAbandoned, ClipsAttached, Journal};
+use crate::journal::{
+    AccountRenamed, AccountResolved, ClipAttempt, ClipsAbandoned, ClipsAttached, Journal, Projection,
+};
 use crate::riot;
 
 /// Match ids fetched per (account, queue) each pass — how many games played
@@ -44,7 +46,7 @@ pub async fn run(cli: &Cli) -> Result<()> {
     let projection = journal.fold()?;
     let mut pending = Vec::new();
     for account in &accounts {
-        if let Err(error) = discover(cli, &projection, account, &mut pending).await {
+        if let Err(error) = discover(cli, &journal, &projection, account, &mut pending).await {
             tracing::warn!(riot_id = %account.riot_id, error = %format!("{error:#}"), "account pass failed");
         }
     }
@@ -81,13 +83,15 @@ struct PendingPost {
 /// into the archive, collecting them as [`PendingPost`]s for the global sort.
 async fn discover(
     cli: &Cli,
-    projection: &crate::journal::Projection,
+    journal: &Journal,
+    projection: &Projection,
     account: &Account,
     pending: &mut Vec<PendingPost>,
 ) -> Result<()> {
     let client = riot::Client::new(&cli.api_key, &account.region)?;
-    let puuid =
-        client.resolve_puuid(&account.riot_id).await.with_context(|| format!("resolving {}", account.riot_id))?;
+    let (riot_id, puuid) = identify(cli, journal, projection, account, &client)
+        .await
+        .with_context(|| format!("resolving {}", account.riot_id))?;
 
     for queue in &account.queues {
         let queue_u16 = queue.map(|q| u16::try_from(q).unwrap_or(0));
@@ -97,11 +101,11 @@ async fn discover(
         // than the newest already-posted game are news; a player/queue with
         // no posted history backfills the single newest game, never the
         // whole window.
-        let floor = projection.newest_posted(&account.riot_id, *queue);
+        let floor = projection.newest_posted(&riot_id, *queue);
         let newest_in_window = ids.first().map(|id| split_match_id(id)).transpose()?.map(|(_, game_id)| game_id);
         for match_id in &ids {
             let (platform, game_id) = split_match_id(match_id)?;
-            if projection.is_posted(platform, game_id, &account.riot_id) {
+            if projection.is_posted(platform, game_id, &riot_id) {
                 continue;
             }
             let is_newest = Some(game_id) == newest_in_window;
@@ -109,7 +113,7 @@ async fn discover(
                 continue;
             }
             // An overlapping queue spec ("420,all") may surface a game twice.
-            if pending.iter().any(|p| p.game_id == game_id && p.riot_id == account.riot_id) {
+            if pending.iter().any(|p| p.game_id == game_id && p.riot_id == riot_id) {
                 continue;
             }
 
@@ -117,7 +121,7 @@ async fn discover(
             let timeline = client.raw_timeline_json(match_id).await?;
             let dir = crate::archive::write(&cli.archive, match_id, &match_json, &timeline)?;
             pending.push(PendingPost {
-                riot_id: account.riot_id.clone(),
+                riot_id: riot_id.clone(),
                 match_id: match_id.clone(),
                 game_id,
                 end_millis: game_end_millis(&match_json),
@@ -126,6 +130,69 @@ async fn discover(
         }
     }
     Ok(())
+}
+
+/// The account's identity for this pass. PUUIDs are the identity; names are
+/// display labels — the first resolution pins name→PUUID in the journal, and
+/// a name Riot no longer knows reverse-resolves through its pin to the
+/// current name (watch list rewritten, rename journaled). Dedup and floors
+/// key by identity, so a rename orphans nothing. Returns (riot_id, puuid).
+async fn identify(
+    cli: &Cli,
+    journal: &Journal,
+    projection: &Projection,
+    account: &Account,
+    client: &riot::Client,
+) -> Result<(String, String)> {
+    if let Some(puuid) = client.resolve_puuid(&account.riot_id).await? {
+        if projection.puuid_of(&account.riot_id) != Some(puuid.as_str()) {
+            journal.append(&AccountResolved { riot_id: account.riot_id.clone(), puuid: puuid.clone() })?;
+        }
+        return Ok((account.riot_id.clone(), puuid));
+    }
+
+    let Some(puuid) = projection.puuid_of(&account.riot_id).map(str::to_string) else {
+        bail!("no account found for `{}` and no pinned PUUID to heal from (typo in the watch list?)", account.riot_id);
+    };
+    let Some(new_riot_id) = client.riot_id_of(&puuid).await? else {
+        bail!("no account found for `{}`; its pinned PUUID no longer resolves either", account.riot_id);
+    };
+
+    tracing::info!(old = %account.riot_id, new = %new_riot_id, "account renamed; updating watch list");
+    rewrite_watch_list(&cli.accounts, &account.riot_id, &new_riot_id)?;
+    journal.append(&AccountRenamed {
+        old_riot_id: account.riot_id.clone(),
+        new_riot_id: new_riot_id.clone(),
+        puuid: puuid.clone(),
+    })?;
+    journal.append(&AccountResolved { riot_id: new_riot_id.clone(), puuid: puuid.clone() })?;
+    Ok((new_riot_id, puuid))
+}
+
+/// Rewrite the watch-list line whose riot-id field is `old` to carry `new`.
+fn rewrite_watch_list(path: &Path, old: &str, new: &str) -> Result<()> {
+    let contents = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let rewritten: String = contents
+        .lines()
+        .map(|line| {
+            let trimmed = line.trim();
+            let matches = !trimmed.starts_with('#')
+                && trimmed.split('|').next().is_some_and(|field| field.trim().eq_ignore_ascii_case(old));
+            if matches {
+                format!(
+                    "{}
+",
+                    line.replacen(old, new, 1)
+                )
+            } else {
+                format!(
+                    "{line}
+"
+                )
+            }
+        })
+        .collect();
+    std::fs::write(path, rewritten).with_context(|| format!("writing {}", path.display()))
 }
 
 /// Analyze and post one discovered game.
@@ -372,6 +439,7 @@ pub fn import_legacy_state(cli: &Cli) -> Result<()> {
                     queue_id,
                     message_id: message_id.clone(),
                     rank: rank.clone(),
+                    puuid: None,
                 })?;
                 games += 1;
             }
@@ -475,6 +543,7 @@ fn backfill_rank_lines(cli: &Cli, journal: &Journal) -> Result<()> {
             queue_id: read_queue_id(&dir).unwrap_or(0),
             message_id: message_id.to_string(),
             rank: Some(rank),
+            puuid: None,
         })?;
         backfilled += 1;
     }

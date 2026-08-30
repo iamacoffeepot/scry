@@ -58,6 +58,10 @@ pub struct GamePosted {
     /// it without a Riot call. Trailing optional (ADR-0059): rows written
     /// before this field decode with it absent.
     pub rank: Option<RankInfo>,
+    /// The player's permanent PUUID — the identity dedup and floors key by
+    /// (names are display labels that change). Trailing optional; rows
+    /// written before this field re-key through the account_resolved pins.
+    pub puuid: Option<String>,
 }
 
 /// The player's ranked standing at post time (league-v4). The LP delta on a
@@ -76,6 +80,26 @@ pub struct RankObserved {
     /// Display label at observation time, e.g. "Gold II".
     pub label: String,
     pub lp: i32,
+}
+
+/// An account's Riot ID resolved to its permanent PUUID — the memory that
+/// lets a later resolution failure be recognized as a rename and reversed
+/// through account-v1 by-puuid. Appended only when the mapping changes.
+#[derive(aether_data::Storage, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[kind(name = "scry.journal.account_resolved")]
+pub struct AccountResolved {
+    pub riot_id: String,
+    pub puuid: String,
+}
+
+/// A tracked account's Riot ID changed; the watch list was rewritten and the
+/// posting floor carried to the new name. Audit record of the self-heal.
+#[derive(aether_data::Storage, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[kind(name = "scry.journal.account_renamed")]
+pub struct AccountRenamed {
+    pub old_riot_id: String,
+    pub new_riot_id: String,
+    pub puuid: String,
 }
 
 /// One clip-recording attempt started for a posted game (the retry budget).

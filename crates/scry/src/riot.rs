@@ -95,19 +95,35 @@ impl Client {
     }
 
     /// Resolve a `gameName#tagLine` Riot ID to its PUUID via account-v1.
-    pub async fn resolve_puuid(&self, riot_id: &str) -> Result<String> {
+    /// `Ok(None)` means Riot has no account under that ID — for a previously
+    /// tracked account that usually means a rename (PUUIDs are permanent;
+    /// names are labels).
+    pub async fn resolve_puuid(&self, riot_id: &str) -> Result<Option<String>> {
         let (game_name, tag_line) =
             riot_id.split_once('#').ok_or_else(|| anyhow!("Riot ID must be `gameName#tagLine`, got `{riot_id}`"))?;
 
-        let account = self
+        Ok(self
             .api
             .account_v1()
             .get_by_riot_id(self.regional, game_name, tag_line)
             .await
             .context("account-v1 request failed")?
-            .ok_or_else(|| anyhow!("no account found for `{riot_id}`"))?;
+            .map(|account| account.puuid))
+    }
 
-        Ok(account.puuid)
+    /// The current `gameName#tagLine` of a PUUID — the reverse lookup that
+    /// turns a stale watch-list name into the account's new one.
+    pub async fn riot_id_of(&self, puuid: &str) -> Result<Option<String>> {
+        let account = self
+            .api
+            .account_v1()
+            .get_by_puuid(self.regional, puuid)
+            .await
+            .context("account-v1 by-puuid request failed")?;
+        Ok(match (account.game_name, account.tag_line) {
+            (Some(name), Some(tag)) if !name.is_empty() => Some(format!("{name}#{tag}")),
+            _ => None,
+        })
     }
 
     /// The player's current standing in `queue_type` (league-v4), or `None`
