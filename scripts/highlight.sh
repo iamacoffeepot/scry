@@ -21,13 +21,15 @@
 
 set -uo pipefail
 
-dir="${1:?usage: highlight.sh <archivedir> [suffix]}"
-sfx="${2:-}"
+dir="${1:?usage: highlight.sh <archivedir> [suffix…]}"
+shift
+# One or more per-player artifact suffixes; the replay loads ONCE and every
+# perspective's clips record in that session (tracked players share games).
+suffixes=("$@")
+[[ ${#suffixes[@]} -eq 0 ]] && suffixes=("")
 # The game resolves the record `path` from ITS own cwd, so it must be absolute.
 dir="$(cd "$dir" && pwd)"
 gid="$(basename "$dir")"        # numeric game id (e.g. 5592737881)
-overview="$dir/overview$sfx.md"
-[[ -f "$overview" ]] || { echo "no overview$sfx.md in $dir — nothing to clip"; exit 0; }
 
 # The per-clip seek + duration come from clips.json (written by --analyze, sized
 # to each fight so the whole play fits). PREROLL is just buffer: we seek a couple
@@ -62,12 +64,23 @@ section_ts() {
 }
 to_secs() { local t="$1"; echo $(( ${t%%:*} * 60 + 10#${t##*:} )); }
 
-hl_ts="$(section_ts Highlight)"
-ll_ts="$(section_ts Lowlight)"
-if [[ -z "$hl_ts" && -z "$ll_ts" ]]; then
-  echo "no Highlight/Lowlight timestamps in overview$sfx.md — skipping clips"; exit 0
+# Gather each perspective's timestamps before touching the replay, so a game
+# with nothing to clip never loads it.
+work=()
+for sfx in "${suffixes[@]}"; do
+  overview="$dir/overview$sfx.md"
+  [[ -f "$overview" ]] || { echo "no overview$sfx.md — skipping that perspective"; continue; }
+  hl_ts="$(section_ts Highlight)"
+  ll_ts="$(section_ts Lowlight)"
+  if [[ -z "$hl_ts" && -z "$ll_ts" ]]; then
+    echo "no timestamps in overview$sfx.md — skipping that perspective"; continue
+  fi
+  echo "clips$sfx: highlight=${hl_ts:-none} lowlight=${ll_ts:-none}"
+  work+=("$sfx|$hl_ts|$ll_ts")
+done
+if [[ ${#work[@]} -eq 0 ]]; then
+  echo "nothing to clip"; exit 0
 fi
-echo "clips: highlight=${hl_ts:-none} lowlight=${ll_ts:-none}"
 
 # --- load THIS game's replay (a stale one may be up) ------------------------
 # The .rofl download verifies asynchronously (metadata state: checking -> watch);
@@ -136,8 +149,12 @@ record_ts() {
   record_clip "$seek" "$dur" "$out"
 }
 
-if [[ -n "$hl_ts" ]]; then echo "recording highlight @ $hl_ts"; record_ts "$hl_ts" "$dir/highlight$sfx.mp4"; fi
-if [[ -n "$ll_ts" ]]; then echo "recording lowlight @ $ll_ts"; record_ts "$ll_ts" "$dir/lowlight$sfx.mp4"; fi
+# One loaded replay serves every perspective: seeks are cheap, loads aren't.
+for entry in "${work[@]}"; do
+  IFS='|' read -r sfx hl_ts ll_ts <<< "$entry"
+  if [[ -n "$hl_ts" ]]; then echo "recording highlight$sfx @ $hl_ts"; record_ts "$hl_ts" "$dir/highlight$sfx.mp4"; fi
+  if [[ -n "$ll_ts" ]]; then echo "recording lowlight$sfx @ $ll_ts"; record_ts "$ll_ts" "$dir/lowlight$sfx.mp4"; fi
+done
 
 # Close the replay game window (leave the client up — it serves the LCU we need
 # to download the next replay).
