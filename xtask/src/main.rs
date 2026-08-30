@@ -228,6 +228,8 @@ fn dot_env(root: &Path) -> Vec<(String, String)> {
 
 fn launchctl(action: &[&str], with_plist: bool) -> Result<()> {
     let target = format!("gui/{}", uid());
+    // HOME is a genuinely external var (the launchd agent's location), not cap config.
+    #[allow(clippy::disallowed_methods)]
     let plist = format!("{}/Library/LaunchAgents/com.scry.poller.plist", std::env::var("HOME").unwrap_or_default());
     let mut args: Vec<String> = action.iter().map(ToString::to_string).collect();
     if with_plist {
@@ -255,6 +257,8 @@ unsafe extern "C" {
 }
 
 fn logs(lines: usize) -> Result<()> {
+    // HOME is a genuinely external var (the service's log location), not cap config.
+    #[allow(clippy::disallowed_methods)]
     let log = format!("{}/Library/Logs/scry-poller.log", std::env::var("HOME").unwrap_or_default());
     let status = Command::new("tail").args(["-n", &lines.to_string(), &log]).status().context("running tail")?;
     if !status.success() {
