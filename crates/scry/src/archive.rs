@@ -23,11 +23,7 @@ pub fn write(dir: &Path, match_id: &str, match_json: &Value, timeline: &Value) -
     fs::write(out.join("match.json"), serde_json::to_vec_pretty(match_json)?)
         .with_context(|| format!("writing {}", out.join("match.json").display()))?;
 
-    let frames = timeline
-        .pointer("/info/frames")
-        .and_then(Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or_default();
+    let frames = timeline.pointer("/info/frames").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
 
     let mut events = String::new();
     for frame in frames {

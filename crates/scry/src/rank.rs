@@ -3,7 +3,6 @@
 //! against the previous snapshot. Deltas are attributed per game as long as we
 //! catalog games in chronological order (one ranked game per poll interval).
 
-use anyhow::{Context, Result};
 use riven::consts::{Division, Queue, QueueType, Tier};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -79,32 +78,17 @@ pub fn queue_type(queue: Queue) -> Option<QueueType> {
     }
 }
 
-/// A persisted snapshot — the ladder value (for diffing) plus readable context.
+/// A legacy `state/lp` snapshot — the ladder value (for diffing) plus readable
+/// context. Superseded by the journal's `rank_observed` events; read only by
+/// `--journal-import`'s one-shot backfill.
 #[derive(Serialize, Deserialize)]
-struct Snapshot {
-    value: i32,
-    label: String,
-    lp: i32,
+pub struct Snapshot {
+    pub value: i32,
+    pub label: String,
+    pub lp: i32,
 }
 
-/// The previous snapshot's ladder value, if one exists.
-pub fn read_previous(path: &Path) -> Option<i32> {
-    let raw = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str::<Snapshot>(&raw).ok().map(|s| s.value)
-}
-
-/// Persist the current standing as the new snapshot for next time.
-pub fn write_snapshot(path: &Path, rank: &Rank) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
-    }
-    let snap = Snapshot {
-        value: rank.ladder_value(),
-        label: rank.label(),
-        lp: rank.lp,
-    };
-    std::fs::write(path, serde_json::to_string(&snap)?)
-        .with_context(|| format!("writing {}", path.display()))?;
-    Ok(())
+/// A legacy snapshot's contents, if the file parses.
+pub fn read_snapshot(path: &Path) -> Option<Snapshot> {
+    serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
 }

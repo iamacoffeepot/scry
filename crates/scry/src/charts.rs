@@ -101,18 +101,11 @@ const TITLE_STRIP: u32 = 44;
 
 /// Draw a panel title horizontally centered at `center_x` (a local pixel x).
 fn draw_title(area: &Area, title: &str, size: u32, center_x: i32) -> Drawn {
-    let style = (FONT, (size * SS) as i32)
-        .into_font()
-        .color(&FG)
-        .pos(Pos::new(HPos::Center, VPos::Top));
+    let style = (FONT, (size * SS) as i32).into_font().color(&FG).pos(Pos::new(HPos::Center, VPos::Top));
     let y = px(10) as i32;
     // Faux-bold: Share Tech Mono ships one weight, so overdraw a 1px box smear.
     for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
-        area.draw(&Text::new(
-            title.to_string(),
-            (center_x + dx, y + dy),
-            style.clone(),
-        ))?;
+        area.draw(&Text::new(title.to_string(), (center_x + dx, y + dy), style.clone()))?;
     }
     Ok(())
 }
@@ -128,13 +121,7 @@ fn plot_center_x<DB: DrawingBackend, CT: CoordTranslate>(
 }
 
 /// Render the composite dashboard to `out` as one anti-aliased PNG.
-pub fn dashboard(
-    game: &Match,
-    frames_jsonl: &str,
-    events_jsonl: &str,
-    puuid: &str,
-    out: &Path,
-) -> Result<()> {
+pub fn dashboard(game: &Match, frames_jsonl: &str, events_jsonl: &str, puuid: &str, out: &Path) -> Result<()> {
     init_fonts();
     let (w, h) = (WIDTH * SS, HEIGHT * SS);
     let mut buf = vec![0u8; (w * h * 3) as usize];
@@ -152,8 +139,7 @@ pub fn dashboard(
         let (_, rest) = rest.split_horizontally(pad);
         let (bottom_right, _) = rest.split_horizontally(chart_w);
 
-        draw_gold(&top, game, frames_jsonl, events_jsonl, puuid)
-            .map_err(|e| anyhow!("gold chart: {e}"))?;
+        draw_gold(&top, game, frames_jsonl, events_jsonl, puuid).map_err(|e| anyhow!("gold chart: {e}"))?;
         draw_damage(&bottom_left, game, puuid).map_err(|e| anyhow!("damage chart: {e}"))?;
         draw_matchup(&bottom_right, game, puuid).map_err(|e| anyhow!("matchup chart: {e}"))?;
 
@@ -167,26 +153,12 @@ pub fn dashboard(
 }
 
 /// Gold lead over time, from the tracked player's team's perspective.
-fn draw_gold(
-    area: &Area,
-    game: &Match,
-    frames_jsonl: &str,
-    events_jsonl: &str,
-    puuid: &str,
-) -> Drawn {
-    let player = game
-        .info
-        .participants
-        .iter()
-        .find(|p| p.puuid == puuid)
-        .ok_or_else(|| "player not found".to_string())?;
+fn draw_gold(area: &Area, game: &Match, frames_jsonl: &str, events_jsonl: &str, puuid: &str) -> Drawn {
+    let player =
+        game.info.participants.iter().find(|p| p.puuid == puuid).ok_or_else(|| "player not found".to_string())?;
     let player_team: Team = player.team_id;
-    let team_of: std::collections::HashMap<i32, Team> = game
-        .info
-        .participants
-        .iter()
-        .map(|p| (p.participant_id, p.team_id))
-        .collect();
+    let team_of: std::collections::HashMap<i32, Team> =
+        game.info.participants.iter().map(|p| (p.participant_id, p.team_id)).collect();
 
     let mut pts: Vec<(f64, f64)> = Vec::new();
     for line in frames_jsonl.lines().filter(|l| !l.trim().is_empty()) {
@@ -228,22 +200,12 @@ fn draw_gold(
         .x_label_formatter(&|v| format!("{v:.0}"))
         .y_label_formatter(&|v| format!("{:+.0}k", v / 1000.0))
         .draw()?;
-    chart.draw_series(LineSeries::new(
-        [(0.0, 0.0), (max_min, 0.0)],
-        ShapeStyle::from(GRID).stroke_width(SS),
-    ))?;
-    chart.draw_series(LineSeries::new(
-        pts.clone(),
-        ShapeStyle::from(GREEN).stroke_width(px(3)),
-    ))?;
+    chart.draw_series(LineSeries::new([(0.0, 0.0), (max_min, 0.0)], ShapeStyle::from(GRID).stroke_width(SS)))?;
+    chart.draw_series(LineSeries::new(pts.clone(), ShapeStyle::from(GREEN).stroke_width(px(3))))?;
 
     // Per-player colors, grouped by team hue (cool = allies, warm = enemies).
-    const ALLY_PAL: [(u8, u8, u8); 5] = [
-        (59, 130, 246), (34, 197, 94), (6, 182, 212), (99, 102, 241), (20, 184, 166),
-    ];
-    const ENEMY_PAL: [(u8, u8, u8); 5] = [
-        (239, 68, 68), (249, 115, 22), (234, 179, 8), (236, 72, 153), (219, 39, 119),
-    ];
+    const ALLY_PAL: [(u8, u8, u8); 5] = [(59, 130, 246), (34, 197, 94), (6, 182, 212), (99, 102, 241), (20, 184, 166)];
+    const ENEMY_PAL: [(u8, u8, u8); 5] = [(239, 68, 68), (249, 115, 22), (234, 179, 8), (236, 72, 153), (219, 39, 119)];
     let mut pcolor: std::collections::HashMap<i32, RGBColor> = std::collections::HashMap::new();
     let mut legend: Vec<(RGBColor, String, bool)> = Vec::new();
     let (mut ai, mut ei) = (0usize, 0usize);
@@ -369,18 +331,12 @@ fn draw_damage(area: &Area, game: &Match, puuid: &str) -> Drawn {
             ENEMY
         };
         chart.draw_series(std::iter::once(Rectangle::new(
-            [
-                (0f64, SegmentValue::Exact(i as i32)),
-                (*dmg as f64, SegmentValue::Exact(i as i32 + 1)),
-            ],
+            [(0f64, SegmentValue::Exact(i as i32)), (*dmg as f64, SegmentValue::Exact(i as i32 + 1))],
             color.filled(),
         )))?;
         // Thick background outline gives the bars visible spacing.
         chart.draw_series(std::iter::once(Rectangle::new(
-            [
-                (0f64, SegmentValue::Exact(i as i32)),
-                (*dmg as f64, SegmentValue::Exact(i as i32 + 1)),
-            ],
+            [(0f64, SegmentValue::Exact(i as i32)), (*dmg as f64, SegmentValue::Exact(i as i32 + 1))],
             ShapeStyle::from(BG).stroke_width(px(3)),
         )))?;
     }
@@ -393,10 +349,7 @@ fn draw_damage(area: &Area, game: &Match, puuid: &str) -> Drawn {
 /// the mixed units are comparable; real values are annotated on the bars.
 fn draw_matchup(area: &Area, game: &Match, puuid: &str) -> Drawn {
     let parts = &game.info.participants;
-    let player = parts
-        .iter()
-        .find(|p| p.puuid == puuid)
-        .ok_or_else(|| "player not found".to_string())?;
+    let player = parts.iter().find(|p| p.puuid == puuid).ok_or_else(|| "player not found".to_string())?;
     let opponent = parts
         .iter()
         .find(|p| p.team_id != player.team_id && p.team_position == player.team_position)
@@ -471,24 +424,10 @@ fn draw_matchup(area: &Area, game: &Match, puuid: &str) -> Drawn {
         let (ph, oh) = (pv / max, ov / max);
         let x = i as f64;
         // player (green) on the left, opponent (red) on the right
-        chart.draw_series(std::iter::once(Rectangle::new(
-            [(x - 0.36, 0.0), (x - 0.02, ph)],
-            GREEN.filled(),
-        )))?;
-        chart.draw_series(std::iter::once(Rectangle::new(
-            [(x + 0.02, 0.0), (x + 0.36, oh)],
-            ENEMY.filled(),
-        )))?;
-        chart.draw_series(std::iter::once(Text::new(
-            plabel.clone(),
-            (x - 0.19, ph + 0.03),
-            value_style.clone(),
-        )))?;
-        chart.draw_series(std::iter::once(Text::new(
-            olabel.clone(),
-            (x + 0.19, oh + 0.03),
-            value_style.clone(),
-        )))?;
+        chart.draw_series(std::iter::once(Rectangle::new([(x - 0.36, 0.0), (x - 0.02, ph)], GREEN.filled())))?;
+        chart.draw_series(std::iter::once(Rectangle::new([(x + 0.02, 0.0), (x + 0.36, oh)], ENEMY.filled())))?;
+        chart.draw_series(std::iter::once(Text::new(plabel.clone(), (x - 0.19, ph + 0.03), value_style.clone())))?;
+        chart.draw_series(std::iter::once(Text::new(olabel.clone(), (x + 0.19, oh + 0.03), value_style.clone())))?;
     }
 
     let opp = spaced_name(&opponent.champion_name);

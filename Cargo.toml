@@ -10,7 +10,7 @@ repository = "https://github.com/iamacoffeepot/scry"
 
 [workspace.dependencies]
 riven = "2.79"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "process", "rt-multi-thread"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "multipart"] }
 plotters = { version = "0.3", default-features = false, features = ["bitmap_backend", "ab_glyph", "line_series"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
@@ -19,5 +19,13 @@ serde_json = "1"
 clap = { version = "4", features = ["derive", "env"] }
 urlencoding = "2"
 anyhow = "1"
+# ADR-0059 storage shape for the journal's event payloads (derive(Storage)),
+# consumed via path dep into the enclosing aether checkout (this repo lives
+# nested at aether/research/scry).
+aether-data = { path = "../../crates/aether-data", features = ["derive"] }
+# The Kind/Storage derives emit native inventory registrations.
+inventory = "0.3"
+# The append-only journal (WAL). `bundled` compiles SQLite in, no system dep.
+rusqlite = { version = "0.37", features = ["bundled"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

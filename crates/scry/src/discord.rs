@@ -19,10 +19,7 @@ pub struct Webhook {
 
 impl Webhook {
     pub fn new(url: String) -> Self {
-        Self {
-            url,
-            http: reqwest::Client::new(),
-        }
+        Self { url, http: reqwest::Client::new() }
     }
 
     /// Post a prebuilt message payload (and any attachments) as one webhook
@@ -31,7 +28,11 @@ impl Webhook {
     pub async fn post(&self, payload: &Value, attachments: &[Attachment]) -> Result<Option<String>> {
         // Incoming webhooks only process Components V2 with this flag; `wait`
         // makes Discord return the created message (so we can read its id).
-        let sep = if self.url.contains('?') { '&' } else { '?' };
+        let sep = if self.url.contains('?') {
+            '&'
+        } else {
+            '?'
+        };
         let url = format!("{}{sep}with_components=true&wait=true", self.url);
         let builder = self.attach(self.http.post(&url), payload, attachments)?;
         let resp = self.send_checked(builder, "posting to Discord webhook").await?;
@@ -44,12 +45,7 @@ impl Webhook {
     /// Edit a previously-posted webhook message in place (used to attach the
     /// clips once recorded). Attachments sent here fully replace the message's
     /// files, so the caller must include every attachment it wants to keep.
-    pub async fn edit(
-        &self,
-        message_id: &str,
-        payload: &Value,
-        attachments: &[Attachment],
-    ) -> Result<()> {
+    pub async fn edit(&self, message_id: &str, payload: &Value, attachments: &[Attachment]) -> Result<()> {
         let base = self.url.split('?').next().unwrap_or(&self.url);
         let url = format!("{base}/messages/{message_id}?with_components=true");
         // On edit, Discord APPENDS uploaded files unless the payload's
@@ -58,11 +54,8 @@ impl Webhook {
         // (otherwise repeated edits pile up to the 10-attachment cap).
         let mut payload = payload.clone();
         if let Some(obj) = payload.as_object_mut() {
-            let atts: Vec<Value> = attachments
-                .iter()
-                .enumerate()
-                .map(|(i, a)| json!({ "id": i, "filename": a.filename }))
-                .collect();
+            let atts: Vec<Value> =
+                attachments.iter().enumerate().map(|(i, a)| json!({ "id": i, "filename": a.filename })).collect();
             obj.insert("attachments".to_string(), Value::Array(atts));
         }
         let builder = self.attach(self.http.patch(&url), &payload, attachments)?;
@@ -80,10 +73,8 @@ impl Webhook {
         if attachments.is_empty() {
             return Ok(builder.json(payload));
         }
-        let mut form = reqwest::multipart::Form::new().text(
-            "payload_json",
-            serde_json::to_string(payload).context("serializing webhook payload")?,
-        );
+        let mut form = reqwest::multipart::Form::new()
+            .text("payload_json", serde_json::to_string(payload).context("serializing webhook payload")?);
         for (i, a) in attachments.iter().enumerate() {
             let mime = match a.filename.rsplit('.').next() {
                 Some("mp4") => "video/mp4",
@@ -99,11 +90,7 @@ impl Webhook {
         Ok(builder.multipart(form))
     }
 
-    async fn send_checked(
-        &self,
-        builder: reqwest::RequestBuilder,
-        what: &'static str,
-    ) -> Result<reqwest::Response> {
+    async fn send_checked(&self, builder: reqwest::RequestBuilder, what: &'static str) -> Result<reqwest::Response> {
         let resp = builder.send().await.context(what)?;
         if !resp.status().is_success() {
             let status = resp.status();
@@ -129,16 +116,15 @@ const FOOTER: &str = "scry - github.com/iamacoffeepot/scry";
 
 /// Embed accent color by result: green on win, red on loss.
 fn result_color(win: bool) -> u32 {
-    if win { 0x2ecc71 } else { 0xe74c3c }
+    if win {
+        0x2ecc71
+    } else {
+        0xe74c3c
+    }
 }
 
 /// The stats-only message (live posting and the no-overview archive case).
-pub fn stats_message(
-    s: &MatchSummary,
-    chart: Option<&str>,
-    highlight: Option<&str>,
-    lowlight: Option<&str>,
-) -> Value {
+pub fn stats_message(s: &MatchSummary, chart: Option<&str>, highlight: Option<&str>, lowlight: Option<&str>) -> Value {
     let mut body = vec![header_section(s), text(stats_text(s))];
     if let Some(name) = chart {
         body.push(media(name));
@@ -245,7 +231,11 @@ fn media(filename: &str) -> Value {
 
 /// Title + player link, with the summoner icon as the section's thumbnail.
 fn header_section(s: &MatchSummary) -> Value {
-    let result = if s.win { "Victory" } else { "Defeat" };
+    let result = if s.win {
+        "Victory"
+    } else {
+        "Defeat"
+    };
     // Title is the player; champion/side and date are secondary rows beneath.
     let queue = if s.queue.is_empty() {
         String::new()
@@ -304,19 +294,14 @@ fn stats_text(s: &MatchSummary) -> String {
 /// Verdict (lead paragraph) then each remaining section under a bold heading.
 fn overview_text(summary: &Summary) -> String {
     let mut out = String::new();
-    if let Some((_, body)) = summary
-        .sections
-        .iter()
-        .find(|(h, _)| h.eq_ignore_ascii_case("Verdict"))
-    {
+    if let Some((_, body)) = summary.sections.iter().find(|(h, _)| h.eq_ignore_ascii_case("Verdict")) {
         // The header already states the result; drop a leading "Victory/Defeat".
         out.push_str(&truncate(strip_result_prefix(body), 1024));
         out.push_str("\n\n");
     }
     for (heading, body) in &summary.sections {
         // Verdict leads above; the clip captions render next to their videos.
-        let is_clip = heading.eq_ignore_ascii_case("Highlight")
-            || heading.eq_ignore_ascii_case("Lowlight");
+        let is_clip = heading.eq_ignore_ascii_case("Highlight") || heading.eq_ignore_ascii_case("Lowlight");
         if !heading.eq_ignore_ascii_case("Verdict") && !is_clip {
             out.push_str(&format!("**{heading}**\n{}\n\n", truncate(body, 1024)));
         }
@@ -365,5 +350,9 @@ fn thousands(n: i32) -> String {
         }
         out.push(ch);
     }
-    if n < 0 { format!("-{out}") } else { out }
+    if n < 0 {
+        format!("-{out}")
+    } else {
+        out
+    }
 }

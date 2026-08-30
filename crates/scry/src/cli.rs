@@ -6,9 +6,10 @@ use clap::Parser;
 #[derive(Debug, Parser)]
 #[command(name = "scry", version, about)]
 pub struct Cli {
-    /// Riot ID in `gameName#tagLine` form, e.g. "Faker#KR1".
+    /// Riot ID in `gameName#tagLine` form, e.g. "Faker#KR1". Required except
+    /// with --tick / --journal-import, which read the watch list instead.
     #[arg(long)]
-    pub riot_id: String,
+    pub riot_id: Option<String>,
 
     /// Platform/region code, e.g. na1, euw1, eun1, kr, br1. Required unless
     /// posting from an archive (--from-archive), which reads the platform from
@@ -45,7 +46,7 @@ pub struct Cli {
     pub summary: Option<PathBuf>,
 
     /// Model label shown in the coach summary's footer (attribution).
-    #[arg(long, default_value = "Claude Opus")]
+    #[arg(long, env = "SCRY_SUMMARY_MODEL", default_value = "Claude Opus")]
     pub summary_model: String,
 
     /// Post a packaged stats + coach embed from a dumped match directory
@@ -84,4 +85,48 @@ pub struct Cli {
     /// the post-time rank/LP from <dir>/.rank.json (no Riot API call).
     #[arg(long)]
     pub edit: bool,
+
+    /// Run one full poll pass over the watch list (--accounts): post each
+    /// newly-completed game, then record clips for one pending game. The
+    /// journal (--journal) is the dedup and clip-job state.
+    #[arg(long)]
+    pub tick: bool,
+
+    /// One-shot cutover: backfill the journal from a pre-journal archive's
+    /// marker files (.posted-*, .message-id, .clip-*) and the state/lp
+    /// snapshots. Refused once the journal has events.
+    #[arg(long)]
+    pub journal_import: bool,
+
+    /// Watch-list file: one `riot_id|region|queue[,queue…]` per line.
+    #[arg(long, env = "SCRY_ACCOUNTS", default_value = "scripts/accounts.txt")]
+    pub accounts: PathBuf,
+
+    /// Archive root the poller dumps matches under.
+    #[arg(long, env = "SCRY_ARCHIVE", default_value = "archive")]
+    pub archive: PathBuf,
+
+    /// The append-only SQLite journal holding posted/clip/rank state.
+    #[arg(long, env = "SCRY_JOURNAL", default_value = "state/scry.sqlite")]
+    pub journal: PathBuf,
+
+    /// With --tick: skip the clip pass (no League client on this host).
+    #[arg(long)]
+    pub no_clips: bool,
+
+    /// Clip attempts per game before the job is abandoned.
+    #[arg(long, env = "CLIP_MAX_TRIES", default_value_t = 15)]
+    pub clip_max_tries: u32,
+}
+
+impl Cli {
+    /// Whether the tick's clip pass runs.
+    pub fn clips(&self) -> bool {
+        !self.no_clips
+    }
+
+    /// The Riot ID, in modes that operate on a single player.
+    pub fn require_riot_id(&self) -> anyhow::Result<&str> {
+        self.riot_id.as_deref().ok_or_else(|| anyhow::anyhow!("--riot-id is required in this mode"))
+    }
 }

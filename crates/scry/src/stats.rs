@@ -88,15 +88,10 @@ pub fn summarize(game: &Match, puuid: &str, ctx: &RenderContext) -> Option<Match
     // icon directly, which avoids DDragon's name-key quirks (Wukong/Fiddlesticks).
     let champion = p.champion().ok();
     let champion_id: i16 = champion.map(i16::from).unwrap_or(-1);
-    let champion_name = champion
-        .and_then(|c| c.name())
-        .map(str::to_owned)
-        .unwrap_or_else(|| p.champion_name.clone());
+    let champion_name = champion.and_then(|c| c.name()).map(str::to_owned).unwrap_or_else(|| p.champion_name.clone());
 
-    let game_name =
-        non_empty(p.riot_id_game_name.clone()).unwrap_or_else(|| ctx.fallback_name.to_owned());
-    let tag_line =
-        non_empty(p.riot_id_tagline.clone()).unwrap_or_else(|| ctx.fallback_tag.to_owned());
+    let game_name = non_empty(p.riot_id_game_name.clone()).unwrap_or_else(|| ctx.fallback_name.to_owned());
+    let tag_line = non_empty(p.riot_id_tagline.clone()).unwrap_or_else(|| ctx.fallback_tag.to_owned());
 
     Some(MatchSummary {
         player: format!("{game_name}#{tag_line}"),

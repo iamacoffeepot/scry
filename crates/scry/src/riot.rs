@@ -37,8 +37,7 @@ impl Client {
 
     /// Raw match-v5 timeline JSON.
     pub async fn raw_timeline_json(&self, match_id: &str) -> Result<Value> {
-        self.raw_get(&format!("/lol/match/v5/matches/{match_id}/timeline"))
-            .await
+        self.raw_get(&format!("/lol/match/v5/matches/{match_id}/timeline")).await
     }
 
     async fn raw_get(&self, path: &str) -> Result<Value> {
@@ -88,9 +87,8 @@ impl Client {
 
     /// Resolve a `gameName#tagLine` Riot ID to its PUUID via account-v1.
     pub async fn resolve_puuid(&self, riot_id: &str) -> Result<String> {
-        let (game_name, tag_line) = riot_id
-            .split_once('#')
-            .ok_or_else(|| anyhow!("Riot ID must be `gameName#tagLine`, got `{riot_id}`"))?;
+        let (game_name, tag_line) =
+            riot_id.split_once('#').ok_or_else(|| anyhow!("Riot ID must be `gameName#tagLine`, got `{riot_id}`"))?;
 
         let account = self
             .api
@@ -105,33 +103,21 @@ impl Client {
 
     /// Most-recent match IDs for a PUUID, newest first.
     /// The player's current standing in `queue`, or `None` if unranked there.
-    pub async fn rank(
-        &self,
-        puuid: &str,
-        queue: riven::consts::QueueType,
-    ) -> Result<Option<crate::rank::Rank>> {
+    pub async fn rank(&self, puuid: &str, queue: riven::consts::QueueType) -> Result<Option<crate::rank::Rank>> {
         let entries = self
             .api
             .league_v4()
             .get_league_entries_by_puuid(self.platform, puuid)
             .await
             .context("league-v4 entries request failed")?;
-        Ok(entries
-            .into_iter()
-            .find(|e| e.queue_type == queue)
-            .map(|e| crate::rank::Rank {
-                tier: e.tier.unwrap_or(riven::consts::Tier::UNRANKED),
-                division: e.rank.unwrap_or(riven::consts::Division::I),
-                lp: e.league_points,
-            }))
+        Ok(entries.into_iter().find(|e| e.queue_type == queue).map(|e| crate::rank::Rank {
+            tier: e.tier.unwrap_or(riven::consts::Tier::UNRANKED),
+            division: e.rank.unwrap_or(riven::consts::Division::I),
+            lp: e.league_points,
+        }))
     }
 
-    pub async fn recent_match_ids(
-        &self,
-        puuid: &str,
-        count: i32,
-        queue: Option<u16>,
-    ) -> Result<Vec<String>> {
+    pub async fn recent_match_ids(&self, puuid: &str, count: i32, queue: Option<u16>) -> Result<Vec<String>> {
         self.api
             .match_v5()
             .get_match_ids_by_puuid(

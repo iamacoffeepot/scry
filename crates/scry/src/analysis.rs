@@ -108,10 +108,7 @@ fn parse_timeline(events_jsonl: &str, team_of: &[(i32, i32)]) -> Timeline {
                     t: ev.get("timestamp").and_then(Value::as_i64).unwrap_or(0),
                     killer: ev.get("killerId").and_then(Value::as_i64).unwrap_or(0) as i32,
                     victim: ev.get("victimId").and_then(Value::as_i64).unwrap_or(0) as i32,
-                    killer_team: team_of_participant(
-                        team_of,
-                        ev.get("killerId").and_then(Value::as_i64).unwrap_or(0),
-                    ),
+                    killer_team: team_of_participant(team_of, ev.get("killerId").and_then(Value::as_i64).unwrap_or(0)),
                     assists,
                     bounty: ev.get("bounty").and_then(Value::as_i64).unwrap_or(0),
                     shutdown: ev.get("shutdownBounty").and_then(Value::as_i64).unwrap_or(0),
@@ -121,9 +118,7 @@ fn parse_timeline(events_jsonl: &str, team_of: &[(i32, i32)]) -> Timeline {
             }
             // Only KILL_MULTI carries a multikill length; the rest (first blood,
             // ace) aren't clip anchors on their own.
-            Some("CHAMPION_SPECIAL_KILL")
-                if ev.get("killType").and_then(Value::as_str) == Some("KILL_MULTI") =>
-            {
+            Some("CHAMPION_SPECIAL_KILL") if ev.get("killType").and_then(Value::as_str) == Some("KILL_MULTI") => {
                 specials.push(Special {
                     t: ev.get("timestamp").and_then(Value::as_i64).unwrap_or(0),
                     killer: ev.get("killerId").and_then(Value::as_i64).unwrap_or(0) as i32,
@@ -164,11 +159,7 @@ fn parse_timeline(events_jsonl: &str, team_of: &[(i32, i32)]) -> Timeline {
     kills.sort_by_key(|k| k.t);
     specials.sort_by_key(|s| s.t);
     objectives.sort_by_key(|o| o.t);
-    Timeline {
-        kills,
-        specials,
-        objectives,
-    }
+    Timeline { kills, specials, objectives }
 }
 
 /// Render the moments as an authoritative grounded-facts brief for the OVERVIEW
@@ -193,19 +184,11 @@ pub fn render_moments_md(
         out.push_str(&format!("- {} — {}\n", mmss(m.t_ms), m.summary));
     }
 
-    let deaths = moments
-        .iter()
-        .filter(|m| matches!(m.kind, MomentKind::Death { .. }))
-        .count();
-    let free = moments
-        .iter()
-        .filter(|m| matches!(m.kind, MomentKind::Death { free: true }))
-        .count();
+    let deaths = moments.iter().filter(|m| matches!(m.kind, MomentKind::Death { .. })).count();
+    let free = moments.iter().filter(|m| matches!(m.kind, MomentKind::Death { free: true })).count();
     out.push_str("\n## Player signals\n");
     if deaths > 0 {
-        out.push_str(&format!(
-            "- Deaths: {deaths}, of which {free} were free (died with no trade)\n"
-        ));
+        out.push_str(&format!("- Deaths: {deaths}, of which {free} were free (died with no trade)\n"));
     }
     for m in moments {
         match m.kind {
@@ -243,16 +226,10 @@ fn fight_conversions(kills: &[KillEv], objectives: &[Objective]) -> Vec<Moment> 
     let team_kills: Vec<Kill> = kills
         .iter()
         .filter(|k| k.killer_team == 100 || k.killer_team == 200)
-        .map(|k| Kill {
-            t: k.t,
-            team: k.killer_team,
-        })
+        .map(|k| Kill { t: k.t, team: k.killer_team })
         .collect();
 
-    let mut won: Vec<WonFight> = cluster_fights(&team_kills)
-        .into_iter()
-        .filter_map(WonFight::from_fight)
-        .collect();
+    let mut won: Vec<WonFight> = cluster_fights(&team_kills).into_iter().filter_map(WonFight::from_fight).collect();
 
     // Attribute each objective to a SINGLE fight — the nearest won fight (by the
     // same team) it could have come from — so a shared tower isn't credited to
@@ -261,10 +238,7 @@ fn fight_conversions(kills: &[KillEv], objectives: &[Objective]) -> Vec<Moment> 
         let claimant = won
             .iter_mut()
             .filter(|f| {
-                f.team == o.team
-                    && f.converting.is_none()
-                    && o.t >= f.start
-                    && o.t <= f.end + CONVERSION_WINDOW_MS
+                f.team == o.team && f.converting.is_none() && o.t >= f.start && o.t <= f.end + CONVERSION_WINDOW_MS
             })
             .max_by_key(|f| f.end);
         if let Some(f) = claimant {
@@ -330,10 +304,7 @@ fn nemesis_moment(kills: &[KillEv], pid: i32, game: &Match) -> Option<Moment> {
     Some(Moment {
         t_ms: last,
         kind: MomentKind::Nemesis,
-        summary: format!(
-            "{champ} was your nemesis — {best_count} of your {} deaths",
-            deaths.len()
-        ),
+        summary: format!("{champ} was your nemesis — {best_count} of your {} deaths", deaths.len()),
         evidence: vec![format!("{best_count}/{} deaths to one enemy", deaths.len())],
     })
 }
@@ -345,10 +316,7 @@ fn objective_absence_moment(objectives: &[Objective], pid: i32) -> Option<Moment
     if majors.len() < 3 {
         return None;
     }
-    let present = majors
-        .iter()
-        .filter(|o| o.participants.contains(&pid))
-        .count();
+    let present = majors.iter().filter(|o| o.participants.contains(&pid)).count();
     if present > 0 {
         return None;
     }
@@ -356,10 +324,7 @@ fn objective_absence_moment(objectives: &[Objective], pid: i32) -> Option<Moment
     Some(Moment {
         t_ms: last,
         kind: MomentKind::ObjectiveAbsence,
-        summary: format!(
-            "You took part in none of the {} major objectives (dragons/Baron/Herald)",
-            majors.len()
-        ),
+        summary: format!("You took part in none of the {} major objectives (dragons/Baron/Herald)", majors.len()),
         evidence: vec![format!("0/{} major objectives", majors.len())],
     })
 }
@@ -367,10 +332,7 @@ fn objective_absence_moment(objectives: &[Objective], pid: i32) -> Option<Moment
 // --- dragon monopoly --------------------------------------------------------
 
 fn dragon_monopoly_moment(objectives: &[Objective]) -> Option<Moment> {
-    let dragons: Vec<&Objective> = objectives
-        .iter()
-        .filter(|o| o.monster == Monster::Dragon)
-        .collect();
+    let dragons: Vec<&Objective> = objectives.iter().filter(|o| o.monster == Monster::Dragon).collect();
     if dragons.len() < 3 {
         return None;
     }
@@ -382,11 +344,7 @@ fn dragon_monopoly_moment(objectives: &[Objective]) -> Option<Moment> {
     Some(Moment {
         t_ms: last,
         kind: MomentKind::DragonMonopoly { team },
-        summary: format!(
-            "{} monopolized the dragons — all {} of them",
-            side_name(team),
-            dragons.len()
-        ),
+        summary: format!("{} monopolized the dragons — all {} of them", side_name(team), dragons.len()),
         evidence: vec![format!("{}-0 on dragons", dragons.len())],
     })
 }
@@ -404,11 +362,7 @@ const SURVIVE_AFTER_MS: i64 = 8_000;
 
 /// Compute the ranked Highlight and Lowlight clip candidates for the centered
 /// player, each an exact-timestamp anchor the OVERVIEW prompt picks from.
-pub fn clip_candidates(
-    game: &Match,
-    events_jsonl: &str,
-    puuid: &str,
-) -> (Vec<Candidate>, Vec<Candidate>) {
+pub fn clip_candidates(game: &Match, events_jsonl: &str, puuid: &str) -> (Vec<Candidate>, Vec<Candidate>) {
     let team_of = team_by_participant(game);
     let tl = parse_timeline(events_jsonl, &team_of);
     let Some(player) = game.info.participants.iter().find(|p| p.puuid == puuid) else {
@@ -416,10 +370,7 @@ pub fn clip_candidates(
     };
     let pid = player.participant_id;
     let pteam = team_i32(player.team_id);
-    (
-        highlight_candidates(&tl, pid, pteam),
-        lowlight_candidates(&tl, pid, pteam, game),
-    )
+    (highlight_candidates(&tl, pid, pteam), lowlight_candidates(&tl, pid, pteam, game))
 }
 
 /// The player's best plays: fights they were central to, scored on kills/assists,
@@ -447,15 +398,9 @@ fn highlight_candidates(tl: &Timeline, pid: i32, pteam: i32) -> Vec<Candidate> {
             .unwrap_or(0);
         // Survived if not a victim during the fight, nor shortly after it.
         let survived = !fight.iter().any(|k| k.victim == pid)
-            && !tl
-                .kills
-                .iter()
-                .any(|k| k.victim == pid && k.t > end && k.t <= end + SURVIVE_AFTER_MS);
+            && !tl.kills.iter().any(|k| k.victim == pid && k.t > end && k.t <= end + SURVIVE_AFTER_MS);
         let objective = tl.objectives.iter().find(|o| {
-            o.team == pteam
-                && o.participants.contains(&pid)
-                && o.t >= start
-                && o.t <= end + CONVERSION_WINDOW_MS
+            o.team == pteam && o.participants.contains(&pid) && o.t >= start && o.t <= end + CONVERSION_WINDOW_MS
         });
 
         let mut score = pkills.len() as i64 * 3 + passists as i64 + gold / 100;
@@ -475,11 +420,8 @@ fn highlight_candidates(tl: &Timeline, pid: i32, pteam: i32) -> Vec<Candidate> {
 
         // The clip spans the player's own action: from their first involved kill
         // to their last, plus lead-in/tail — so a whole multikill sequence fits.
-        let involved: Vec<i64> = fight
-            .iter()
-            .filter(|k| k.killer == pid || k.assists.contains(&pid))
-            .map(|k| k.t)
-            .collect();
+        let involved: Vec<i64> =
+            fight.iter().filter(|k| k.killer == pid || k.assists.contains(&pid)).map(|k| k.t).collect();
         let anchor = *involved.first().unwrap_or(&start);
         let last_involved = *involved.last().unwrap_or(&anchor);
         let seek_s = (anchor / 1000 - CLIP_LEAD_S).max(0);
@@ -498,9 +440,7 @@ fn highlight_candidates(tl: &Timeline, pid: i32, pteam: i32) -> Vec<Candidate> {
         } else {
             ""
         };
-        let obj_s = objective
-            .map(|o| format!("; {} followed", o.label))
-            .unwrap_or_default();
+        let obj_s = objective.map(|o| format!("; {} followed", o.label)).unwrap_or_default();
         let summary = format!(
             "you went {}/{}/{} in a fight{multi_s}{surv_s}{obj_s} (+{gold}g)",
             pkills.len(),
@@ -524,10 +464,8 @@ fn lowlight_candidates(tl: &Timeline, pid: i32, pteam: i32, game: &Match) -> Vec
                 && a.t <= death.t + TRADE_AFTER_MS
                 && dist(a.x, a.y, death.x, death.y) <= TRADE_RADIUS
         });
-        let punished = tl
-            .objectives
-            .iter()
-            .find(|o| o.team == enemy && o.t >= death.t && o.t <= death.t + PUNISH_WINDOW_MS);
+        let punished =
+            tl.objectives.iter().find(|o| o.team == enemy && o.t >= death.t && o.t <= death.t + PUNISH_WINDOW_MS);
 
         let mut score = 2 + death.shutdown / 100 + death.bounty / 200;
         if !traded {
@@ -538,15 +476,17 @@ fn lowlight_candidates(tl: &Timeline, pid: i32, pteam: i32, game: &Match) -> Vec
         }
 
         let killer = champ_of(game, death.killer);
-        let free_s = if traded { "" } else { " (free death)" };
+        let free_s = if traded {
+            ""
+        } else {
+            " (free death)"
+        };
         let gold_s = if death.shutdown > 0 {
             format!(", gave up a {}g shutdown", death.shutdown)
         } else {
             String::new()
         };
-        let obj_s = punished
-            .map(|o| format!("; {} followed", o.label))
-            .unwrap_or_default();
+        let obj_s = punished.map(|o| format!("; {} followed", o.label)).unwrap_or_default();
         let summary = format!("caught by {killer}{free_s}{gold_s}{obj_s}");
         // A death is a single instant: lead-in, the death, a short tail.
         let seek_s = (death.t / 1000 - CLIP_LEAD_S).max(0);
@@ -716,15 +656,12 @@ impl WonFight {
     fn from_fight(f: Fight) -> Option<WonFight> {
         let team = f.winner()?;
         let (blue, red) = (f.kills_for(100), f.kills_for(200));
-        let (won, lost) = if team == 100 { (blue, red) } else { (red, blue) };
-        Some(WonFight {
-            team,
-            start: f.start,
-            end: f.end,
-            won,
-            lost,
-            converting: None,
-        })
+        let (won, lost) = if team == 100 {
+            (blue, red)
+        } else {
+            (red, blue)
+        };
+        Some(WonFight { team, start: f.start, end: f.end, won, lost, converting: None })
     }
 
     fn into_moment(self) -> Moment {
@@ -750,21 +687,12 @@ impl WonFight {
                     self.lost,
                     mmss(self.end),
                 ),
-                vec![format!(
-                    "fight {}-{} ({}–{})",
-                    self.won,
-                    self.lost,
-                    mmss(self.start),
-                    mmss(self.end)
-                )],
+                vec![format!("fight {}-{} ({}–{})", self.won, self.lost, mmss(self.start), mmss(self.end))],
             ),
         };
         Moment {
             t_ms: self.end,
-            kind: MomentKind::FightConversion {
-                team: self.team,
-                converted: self.converting.is_some(),
-            },
+            kind: MomentKind::FightConversion { team: self.team, converted: self.converting.is_some() },
             summary,
             evidence,
         }
@@ -780,11 +708,7 @@ fn cluster_fights(kills: &[Kill]) -> Vec<Fight> {
                 f.end = k.t;
                 f.kills.push(k.team);
             }
-            _ => fights.push(Fight {
-                start: k.t,
-                end: k.t,
-                kills: vec![k.team],
-            }),
+            _ => fights.push(Fight { start: k.t, end: k.t, kills: vec![k.team] }),
         }
     }
     fights
@@ -794,18 +718,11 @@ fn cluster_fights(kills: &[Kill]) -> Vec<Fight> {
 
 /// participantId (1..=10) -> team id (100/200), indexed by participant order.
 fn team_by_participant(game: &Match) -> Vec<(i32, i32)> {
-    game.info
-        .participants
-        .iter()
-        .map(|p| (p.participant_id, team_i32(p.team_id)))
-        .collect()
+    game.info.participants.iter().map(|p| (p.participant_id, team_i32(p.team_id))).collect()
 }
 
 fn team_of_participant(map: &[(i32, i32)], participant_id: i64) -> i32 {
-    map.iter()
-        .find(|(id, _)| i64::from(*id) == participant_id)
-        .map(|(_, team)| *team)
-        .unwrap_or(0)
+    map.iter().find(|(id, _)| i64::from(*id) == participant_id).map(|(_, team)| *team).unwrap_or(0)
 }
 
 fn team_i32(team: Team) -> i32 {
@@ -909,12 +826,10 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    const MOON_PUUID: &str =
-        "Mbv5r1kdyiQ3LgUGDz_gGPw73yE1GUvkPpAnI3-1Yg3wWivrzaI1E-TvYS7bNvSw3RZzg4yRhw35AA";
+    const MOON_PUUID: &str = "Mbv5r1kdyiQ3LgUGDz_gGPw73yE1GUvkPpAnI3-1Yg3wWivrzaI1E-TvYS7bNvSw3RZzg4yRhw35AA";
 
     fn fixture() -> Option<(Match, String)> {
-        let dir =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../archive/NA1/5592214271");
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../archive/NA1/5592214271");
         let match_json = std::fs::read_to_string(dir.join("match.json")).ok()?;
         let events = std::fs::read_to_string(dir.join("timeline-events.jsonl")).ok()?;
         let game: Match = serde_json::from_str(&match_json).ok()?;
@@ -948,14 +863,8 @@ mod tests {
             }
         }
         assert!(red_won >= 3, "expected Red to win >=3 fights, got {red_won}");
-        assert!(
-            red_conv * 2 <= red_won,
-            "expected Red to squander most fights ({red_conv}/{red_won} converted)"
-        );
-        assert!(
-            blue_conv * 2 > blue_won,
-            "expected Blue to convert most fights ({blue_conv}/{blue_won} converted)"
-        );
+        assert!(red_conv * 2 <= red_won, "expected Red to squander most fights ({red_conv}/{red_won} converted)");
+        assert!(blue_conv * 2 > blue_won, "expected Blue to convert most fights ({blue_conv}/{blue_won} converted)");
     }
 
     /// Moon died mostly for nothing, to one repeat killer, and touched no epics.
@@ -967,23 +876,12 @@ mod tests {
         };
         let moments = analyze(&game, &events, MOON_PUUID);
 
-        let free = moments
-            .iter()
-            .filter(|m| matches!(m.kind, MomentKind::Death { free: true }))
-            .count();
+        let free = moments.iter().filter(|m| matches!(m.kind, MomentKind::Death { free: true })).count();
         assert!(free >= 5, "expected many free deaths, got {free}");
+        assert!(moments.iter().any(|m| m.kind == MomentKind::Nemesis), "expected a nemesis moment");
+        assert!(moments.iter().any(|m| m.kind == MomentKind::ObjectiveAbsence), "expected Moon absent from all majors");
         assert!(
-            moments.iter().any(|m| m.kind == MomentKind::Nemesis),
-            "expected a nemesis moment"
-        );
-        assert!(
-            moments.iter().any(|m| m.kind == MomentKind::ObjectiveAbsence),
-            "expected Moon absent from all majors"
-        );
-        assert!(
-            moments
-                .iter()
-                .any(|m| matches!(m.kind, MomentKind::DragonMonopoly { team: 100 })),
+            moments.iter().any(|m| matches!(m.kind, MomentKind::DragonMonopoly { team: 100 })),
             "expected Blue dragon monopoly"
         );
     }

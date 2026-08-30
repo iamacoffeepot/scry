@@ -3,10 +3,12 @@ mod archive;
 mod charts;
 mod cli;
 mod discord;
+mod journal;
 mod rank;
 mod riot;
 mod stats;
 mod summary;
+mod tick;
 
 use std::fs;
 use std::path::Path;
@@ -30,6 +32,16 @@ async fn main() -> Result<()> {
 }
 
 async fn run(cli: Cli) -> Result<()> {
+    // One full poll pass over the watch list (the poll.sh loop body).
+    if cli.tick {
+        return tick::run(&cli).await;
+    }
+
+    // One-shot cutover from the marker-file state to the journal.
+    if cli.journal_import {
+        return tick::import_legacy_state(&cli);
+    }
+
     // Post a packaged embed from a dumped match record — no Riot API calls.
     if let Some(dir) = cli.from_archive.as_deref() {
         return post_from_archive(&cli, dir).await;
@@ -37,23 +49,18 @@ async fn run(cli: Cli) -> Result<()> {
 
     // Run the causal analysis over a dumped match and print the moments.
     if let Some(dir) = cli.analyze.as_deref() {
-        return analyze_archive(&cli.riot_id, dir);
+        return analyze_archive(cli.require_riot_id()?, dir);
     }
 
-    let region = cli
-        .region
-        .as_deref()
-        .context("--region is required (except with --from-archive)")?;
+    let region = cli.region.as_deref().context("--region is required (except with --from-archive)")?;
     let client = riot::Client::new(&cli.api_key, region)?;
 
-    let puuid = client
-        .resolve_puuid(&cli.riot_id)
-        .await
-        .with_context(|| format!("resolving Riot ID {}", cli.riot_id))?;
+    let riot_id = cli.require_riot_id()?;
+    let puuid = client.resolve_puuid(riot_id).await.with_context(|| format!("resolving Riot ID {riot_id}"))?;
 
     let match_ids = client.recent_match_ids(&puuid, cli.count, cli.queue).await?;
     if match_ids.is_empty() {
-        tracing::warn!("no recent matches found for {}", cli.riot_id);
+        tracing::warn!("no recent matches found for {riot_id}");
         return Ok(());
     }
 
@@ -71,15 +78,8 @@ async fn run(cli: Cli) -> Result<()> {
     }
 
     // Fallback display name/tag if Riot omits them on the participant.
-    let (fallback_name, fallback_tag) = cli
-        .riot_id
-        .split_once('#')
-        .unwrap_or((cli.riot_id.as_str(), ""));
-    let ctx = stats::RenderContext {
-        region_slug: client.region_slug(),
-        fallback_name,
-        fallback_tag,
-    };
+    let (fallback_name, fallback_tag) = riot_id.split_once('#').unwrap_or((riot_id, ""));
+    let ctx = stats::RenderContext { region_slug: client.region_slug(), fallback_name, fallback_tag };
 
     let webhook = discord::Webhook::new(cli.webhook.clone());
 
@@ -90,9 +90,7 @@ async fn run(cli: Cli) -> Result<()> {
             tracing::warn!(%match_id, "player not found in match participants; skipping");
             continue;
         };
-        webhook
-            .post(&discord::stats_message(&match_summary, None, None, None), &[])
-            .await?; // live posting doesn't track the message id
+        webhook.post(&discord::stats_message(&match_summary, None, None, None), &[]).await?; // live posting doesn't track the message id
         tracing::info!(%match_id, "posted summary");
     }
 
@@ -116,12 +114,8 @@ fn analyze_archive(riot_id: &str, dir: &Path) -> Result<()> {
         .find(|p| {
             // Riot IDs are case-insensitive; match data stores the registered
             // casing (often lowercase), so compare without case.
-            p.riot_id_game_name
-                .as_deref()
-                .is_some_and(|n| n.eq_ignore_ascii_case(name))
-                && p.riot_id_tagline
-                    .as_deref()
-                    .is_some_and(|t| t.eq_ignore_ascii_case(tag))
+            p.riot_id_game_name.as_deref().is_some_and(|n| n.eq_ignore_ascii_case(name))
+                && p.riot_id_tagline.as_deref().is_some_and(|t| t.eq_ignore_ascii_case(tag))
         })
         .map(|p| p.puuid.clone())
         .ok_or_else(|| anyhow!("player {} not found in {}", riot_id, dir.display()))?;
@@ -169,10 +163,8 @@ async fn post_from_archive(cli: &Cli, dir: &Path) -> Result<()> {
         .with_context(|| format!("reading {}", dir.join("match.json").display()))?;
     let game: Match = serde_json::from_str(&raw).context("parsing match.json into match-v5")?;
 
-    let (name, tag) = cli
-        .riot_id
-        .split_once('#')
-        .unwrap_or((cli.riot_id.as_str(), ""));
+    let riot_id = cli.require_riot_id()?;
+    let (name, tag) = riot_id.split_once('#').unwrap_or((riot_id, ""));
     let player = game
         .info
         .participants
@@ -180,14 +172,10 @@ async fn post_from_archive(cli: &Cli, dir: &Path) -> Result<()> {
         .find(|p| {
             // Riot IDs are case-insensitive; match data stores the registered
             // casing (often lowercase), so compare without case.
-            p.riot_id_game_name
-                .as_deref()
-                .is_some_and(|n| n.eq_ignore_ascii_case(name))
-                && p.riot_id_tagline
-                    .as_deref()
-                    .is_some_and(|t| t.eq_ignore_ascii_case(tag))
+            p.riot_id_game_name.as_deref().is_some_and(|n| n.eq_ignore_ascii_case(name))
+                && p.riot_id_tagline.as_deref().is_some_and(|t| t.eq_ignore_ascii_case(tag))
         })
-        .ok_or_else(|| anyhow!("player {} not found in {}", cli.riot_id, dir.display()))?;
+        .ok_or_else(|| anyhow!("player {riot_id} not found in {}", dir.display()))?;
     let puuid = player.puuid.clone();
 
     let ctx = stats::RenderContext {
@@ -196,7 +184,11 @@ async fn post_from_archive(cli: &Cli, dir: &Path) -> Result<()> {
         fallback_tag: tag,
     };
     let mut match_summary = stats::summarize(&game, &puuid, &ctx)
-        .ok_or_else(|| anyhow!("could not summarize {} from {}", cli.riot_id, dir.display()))?;
+        .ok_or_else(|| anyhow!("could not summarize {riot_id} from {}", dir.display()))?;
+
+    // The journal records this post/edit; the tick pass folds it for dedup,
+    // clip jobs, and LP baselines.
+    let journal = journal::Journal::open(&cli.journal)?;
 
     // LP tracking. On an --edit we must NOT re-fetch or re-diff: the snapshot
     // was already advanced at post time, so a second diff would read zero. Reuse
@@ -213,18 +205,19 @@ async fn post_from_archive(cli: &Cli, dir: &Path) -> Result<()> {
         let client = riot::Client::new(&cli.api_key, &region)?;
         match client.rank(&puuid, queue).await {
             Ok(Some(current)) => {
-                let snap = cli
-                    .state_dir
-                    .join(format!("{}_{}.json", puuid, game.info.queue_id.0));
-                let delta = rank::read_previous(&snap).map(|prev| current.ladder_value() - prev);
-                if let Err(e) = rank::write_snapshot(&snap, &current) {
-                    tracing::warn!(error = %e, "writing LP snapshot failed");
-                }
-                let info = stats::RankInfo {
+                // The journal's last rank_observed for this (puuid, queue) is
+                // the baseline; this observation becomes the next one.
+                let queue_id = u32::from(game.info.queue_id.0);
+                let delta = journal.fold()?.previous_ladder(&puuid, queue_id).map(|prev| current.ladder_value() - prev);
+                journal.append(&journal::RankObserved {
+                    puuid: puuid.clone(),
+                    riot_id: riot_id.to_string(),
+                    queue_id,
+                    ladder_value: current.ladder_value(),
                     label: current.label(),
                     lp: current.lp,
-                    delta,
-                };
+                })?;
+                let info = stats::RankInfo { label: current.label(), lp: current.lp, delta };
                 // Persist so a later --edit renders the identical LP line.
                 if let Ok(json) = serde_json::to_string(&info) {
                     let _ = fs::write(&rank_path, json);
@@ -232,7 +225,7 @@ async fn post_from_archive(cli: &Cli, dir: &Path) -> Result<()> {
                 match_summary.rank = Some(info);
             }
             Ok(None) => tracing::info!("player is unranked in this queue; no LP line"),
-            Err(e) => tracing::warn!(error = %e, "rank fetch failed; skipping LP line"),
+            Err(e) => tracing::warn!(error = %format!("{e:#}"), "rank fetch failed; skipping LP line"),
         }
     }
 
@@ -240,8 +233,7 @@ async fn post_from_archive(cli: &Cli, dir: &Path) -> Result<()> {
     let mut attachments: Vec<discord::Attachment> = Vec::new();
     let chart = if cli.charts {
         let charts_dir = dir.join("charts");
-        fs::create_dir_all(&charts_dir)
-            .with_context(|| format!("creating {}", charts_dir.display()))?;
+        fs::create_dir_all(&charts_dir).with_context(|| format!("creating {}", charts_dir.display()))?;
         let frames = fs::read_to_string(dir.join("timeline-frames.jsonl"))
             .with_context(|| format!("reading {}", dir.join("timeline-frames.jsonl").display()))?;
         let events = fs::read_to_string(dir.join("timeline-events.jsonl"))
@@ -249,10 +241,7 @@ async fn post_from_archive(cli: &Cli, dir: &Path) -> Result<()> {
         let png_path = charts_dir.join("dashboard.png");
         charts::dashboard(&game, &frames, &events, &puuid, &png_path)?;
         let bytes = fs::read(&png_path).with_context(|| format!("reading {}", png_path.display()))?;
-        attachments.push(discord::Attachment {
-            filename: "dashboard.png".to_string(),
-            bytes,
-        });
+        attachments.push(discord::Attachment { filename: "dashboard.png".to_string(), bytes });
         Some("dashboard.png")
     } else {
         None
@@ -266,10 +255,7 @@ async fn post_from_archive(cli: &Cli, dir: &Path) -> Result<()> {
             return Ok(None);
         }
         let bytes = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
-        attachments.push(discord::Attachment {
-            filename: name.to_string(),
-            bytes,
-        });
+        attachments.push(discord::Attachment { filename: name.to_string(), bytes });
         Ok(Some(name))
     };
     let highlight = embed_clip("highlight.mp4")?;
@@ -279,20 +265,13 @@ async fn post_from_archive(cli: &Cli, dir: &Path) -> Result<()> {
     // --no-overview renders a minimal header + stats + clips embed instead
     // (the summary is still parsed, for the clip captions).
     let message = if let Some(summary_path) = cli.summary.as_deref() {
-        let md = fs::read_to_string(summary_path)
-            .with_context(|| format!("reading summary {}", summary_path.display()))?;
+        let md =
+            fs::read_to_string(summary_path).with_context(|| format!("reading summary {}", summary_path.display()))?;
         let summary = summary::parse(&md);
         if cli.no_overview {
             discord::clips_message(&match_summary, &summary, &cli.summary_model, highlight, lowlight)
         } else {
-            discord::combined_message(
-                &match_summary,
-                &summary,
-                &cli.summary_model,
-                chart,
-                highlight,
-                lowlight,
-            )
+            discord::combined_message(&match_summary, &summary, &cli.summary_model, chart, highlight, lowlight)
         }
     } else {
         discord::stats_message(&match_summary, chart, highlight, lowlight)
@@ -300,20 +279,30 @@ async fn post_from_archive(cli: &Cli, dir: &Path) -> Result<()> {
 
     let webhook = discord::Webhook::new(cli.webhook.clone());
     let mid_path = dir.join(".message-id");
+    let (platform, game_id) = tick::split_match_id(&game.metadata.match_id)
+        .with_context(|| format!("archive {} has a malformed match id", dir.display()))?;
     if cli.edit {
         // Attach the clips to the message we already posted for this archive.
         let message_id = fs::read_to_string(&mid_path)
             .with_context(|| format!("reading {} (was this archive posted?)", mid_path.display()))?;
         webhook.edit(message_id.trim(), &message, &attachments).await?;
+        journal.append(&journal::ClipsAttached { platform: platform.to_string(), game_id })?;
         tracing::info!(dir = %dir.display(), "edited posted message with clips");
     } else {
         // Initial post: record the message id so the clip pass can edit it.
-        if let Some(id) = webhook.post(&message, &attachments).await? {
-            fs::write(&mid_path, &id)
-                .with_context(|| format!("writing {}", mid_path.display()))?;
-        } else {
+        let message_id = webhook.post(&message, &attachments).await?.unwrap_or_default();
+        if message_id.is_empty() {
             tracing::warn!("webhook did not return a message id; clips can't be attached later");
+        } else {
+            fs::write(&mid_path, &message_id).with_context(|| format!("writing {}", mid_path.display()))?;
         }
+        journal.append(&journal::GamePosted {
+            platform: platform.to_string(),
+            game_id,
+            riot_id: riot_id.to_string(),
+            queue_id: u32::from(game.info.queue_id.0),
+            message_id,
+        })?;
         tracing::info!(dir = %dir.display(), "posted package from archive");
     }
     Ok(())
