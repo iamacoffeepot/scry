@@ -5,14 +5,14 @@
 //! chronology: every account/queue's unposted games (floor-guarded) are
 //! dumped and stamped with their game-end time first, then the whole batch
 //! posts sorted by when the games actually finished — regardless of which
-//! tracked player they belong to. Per game: analyze (which also writes the
-//! deterministic clip pick + captions into `overview.md`) → post (which
-//! appends `game_posted` + `rank_observed`). Then the serialized clip pass:
-//! pending jobs newest-first, client idle only (re-checked per job),
-//! `scripts/highlight.sh`, edit the post to attach — bounded by
-//! `--clips-per-pass`, since recording is real-time. The contention rules the
-//! shell version learned the hard way still hold: one replay at a time, never
-//! during a live game.
+//! tracked player they belong to. Per game: analyze (which journals the
+//! deterministic clip picks as `picks_assigned`) → post (which appends
+//! `game_posted` + `rank_observed`). Then the serialized clip pass: pending
+//! jobs newest-first, client idle only (re-checked per job),
+//! `scripts/highlight.sh` handed each perspective's clip windows, edit the
+//! post to attach — bounded by `--clips-per-pass`, since recording is
+//! real-time. The contention rules the shell version learned the hard way
+//! still hold: one replay at a time, never during a live game.
 
 use std::path::{Path, PathBuf};
 
@@ -20,7 +20,7 @@ use anyhow::{Context, Result, anyhow, bail};
 
 use crate::cli::Cli;
 use crate::journal::{
-    AccountRenamed, AccountResolved, ClipAttempt, ClipsAbandoned, ClipsAttached, Journal, Projection,
+    AccountRenamed, AccountResolved, ClipAttempt, ClipsAbandoned, Journal, PicksAssigned, Projection,
 };
 use crate::riot;
 
@@ -197,12 +197,12 @@ fn rewrite_watch_list(path: &Path, old: &str, new: &str) -> Result<()> {
 
 /// Analyze and post one discovered game.
 async fn post_one(cli: &Cli, post: &PendingPost) -> Result<()> {
-    // analyze writes the per-player moments/clips/overview artifacts (clip
-    // picks + captions differ per tracked perspective).
-    crate::analyze_archive(&post.riot_id, &post.dir, &roster_riot_ids(cli))?;
-    // The post path appends `game_posted` (+ `rank_observed`).
-    let overview = post.dir.join(format!("overview-{}.md", slug(&post.riot_id)));
-    crate::post_from_archive(&post_cli(cli, &post.riot_id, &overview, &post.dir, /* edit */ false), &post.dir).await?;
+    // Journal the deterministic clip picks for this perspective (picks +
+    // captions differ per tracked player), then post — the post path reads
+    // the captions back out of the journal and appends `game_posted`
+    // (+ `rank_observed`).
+    crate::journal_picks(&Journal::open(&cli.journal)?, &post.riot_id, &post.dir, &roster_riot_ids(cli))?;
+    crate::post_from_archive(&post_cli(cli, &post.riot_id, &post.dir, /* edit */ false), &post.dir).await?;
     tracing::info!(riot_id = %post.riot_id, match_id = %post.match_id, "posted");
     Ok(())
 }
@@ -315,15 +315,7 @@ async fn try_game_clips(
                 tries: job.tries,
                 riot_id: Some(job.riot_id.clone()),
             })?;
-            let suffix = format!("-{}", slug(&job.riot_id));
-            if !dir.join(format!("overview{suffix}.md")).exists() {
-                let _ = crate::analyze_archive(&job.riot_id, &dir, &roster_riot_ids(cli));
-            }
-            let overview = dir.join(format!("overview{suffix}.md"));
-            if overview.exists()
-                && let Err(error) =
-                    crate::post_from_archive(&post_cli(cli, &job.riot_id, &overview, &dir, true), &dir).await
-            {
+            if let Err(error) = crate::post_from_archive(&post_cli(cli, &job.riot_id, &dir, true), &dir).await {
                 tracing::debug!(%platform, game_id, error = %format!("{error:#}"), "expired-replay note edit failed");
             }
         }
@@ -339,8 +331,9 @@ async fn try_game_clips(
     }
 
     // Which perspectives ride this session: budget-exhausted jobs abandon,
-    // unanalyzable ones (e.g. renamed since the game) abandon, the rest
-    // ensure their per-player artifacts and join the batch.
+    // unanalyzable ones (e.g. renamed since the game) abandon, pickless ones
+    // (nothing clip-worthy) abandon, the rest join the batch with their
+    // journaled clip windows.
     let mut batch = Vec::new();
     for job in jobs {
         if job.tries >= cli.clip_max_tries {
@@ -353,11 +346,26 @@ async fn try_game_clips(
             })?;
             continue;
         }
-        let suffix = format!("-{}", slug(&job.riot_id));
-        if !dir.join(format!("overview{suffix}.md")).exists()
-            && let Err(error) = crate::analyze_archive(&job.riot_id, &dir, &roster_riot_ids(cli))
-        {
-            tracing::warn!(%platform, game_id, riot_id = %job.riot_id, error = %format!("{error:#}"), "perspective analysis failed; abandoning clips");
+        // A game posted before picks were journaled (or by an older build)
+        // recomputes them here — the analysis is deterministic.
+        let picks = match projection.picks(&platform, game_id, &job.riot_id).cloned() {
+            Some(picks) => picks,
+            None => match crate::journal_picks(journal, &job.riot_id, &dir, &roster_riot_ids(cli)) {
+                Ok(picks) => picks,
+                Err(error) => {
+                    tracing::warn!(%platform, game_id, riot_id = %job.riot_id, error = %format!("{error:#}"), "perspective analysis failed; abandoning clips");
+                    journal.append(&ClipsAbandoned {
+                        platform: platform.clone(),
+                        game_id,
+                        tries: job.tries,
+                        riot_id: Some(job.riot_id.clone()),
+                    })?;
+                    continue;
+                }
+            },
+        };
+        if picks.highlight.is_none() && picks.lowlight.is_none() {
+            tracing::info!(%platform, game_id, riot_id = %job.riot_id, "nothing clip-worthy; abandoning clips");
             journal.append(&ClipsAbandoned {
                 platform: platform.clone(),
                 game_id,
@@ -366,7 +374,7 @@ async fn try_game_clips(
             })?;
             continue;
         }
-        batch.push((suffix, job));
+        batch.push((format!("-{}", slug(&job.riot_id)), job, picks));
     }
     if batch.is_empty() {
         return Ok(ClipOutcome::Skipped);
@@ -379,7 +387,7 @@ async fn try_game_clips(
         return Ok(ClipOutcome::NotReady);
     }
 
-    for (_, job) in &batch {
+    for (_, job, _) in &batch {
         journal.append(&ClipAttempt {
             platform: platform.clone(),
             game_id,
@@ -390,8 +398,8 @@ async fn try_game_clips(
     tracing::info!(%platform, game_id, perspectives = batch.len(), "recording clips");
     let mut command = tokio::process::Command::new("scripts/highlight.sh");
     command.arg(&dir);
-    for (suffix, _) in &batch {
-        command.arg(suffix);
+    for (suffix, _, picks) in &batch {
+        command.arg(clip_spec(suffix, picks));
     }
     let status = command.status().await.context("running scripts/highlight.sh")?;
     if !status.success() {
@@ -400,7 +408,7 @@ async fn try_game_clips(
     }
 
     let mut attached = 0;
-    for (suffix, job) in &batch {
+    for (suffix, job, _) in &batch {
         let highlight = dir.join(format!("highlight{suffix}.mp4"));
         let lowlight = dir.join(format!("lowlight{suffix}.mp4"));
         if !highlight.exists() && !lowlight.exists() {
@@ -408,12 +416,22 @@ async fn try_game_clips(
             continue;
         }
         // The edit path appends `clips_attached` on success.
-        let overview = dir.join(format!("overview{suffix}.md"));
-        crate::post_from_archive(&post_cli(cli, &job.riot_id, &overview, &dir, /* edit */ true), &dir).await?;
+        crate::post_from_archive(&post_cli(cli, &job.riot_id, &dir, /* edit */ true), &dir).await?;
         tracing::info!(%platform, game_id, riot_id = %job.riot_id, "clips attached");
         attached += 1;
     }
     Ok(ClipOutcome::Recorded(attached))
+}
+
+/// One perspective's argument to `highlight.sh`:
+/// `<suffix>|<hl_seek>,<hl_dur>|<ll_seek>,<ll_dur>` with an empty field for a
+/// side that has no pick — the journaled clip windows, so the script records
+/// without parsing any artifact.
+fn clip_spec(suffix: &str, picks: &PicksAssigned) -> String {
+    let side = |pick: &Option<crate::journal::ClipPick>| {
+        pick.as_ref().map(|c| format!("{},{}", c.seek_secs, c.duration_secs)).unwrap_or_default()
+    };
+    format!("{suffix}|{}|{}", side(&picks.highlight), side(&picks.lowlight))
 }
 
 /// Whether the replay for `game_id` is downloaded and verified (metadata
@@ -489,8 +507,8 @@ async fn lcu_request(path: &str, post_body: Option<&'static str>) -> Option<Stri
 }
 
 /// The `Cli` a tick-driven post/edit runs with: `--from-archive <dir>
-/// --summary <overview> --no-overview --track-lp [--edit]`.
-fn post_cli(cli: &Cli, riot_id: &str, overview: &Path, dir: &Path, edit: bool) -> Cli {
+/// --track-lp [--edit]`.
+fn post_cli(cli: &Cli, riot_id: &str, dir: &Path, edit: bool) -> Cli {
     Cli {
         riot_id: Some(riot_id.to_string()),
         region: None,
@@ -499,17 +517,11 @@ fn post_cli(cli: &Cli, riot_id: &str, overview: &Path, dir: &Path, edit: bool) -
         count: 1,
         queue: None,
         dump: None,
-        summary: Some(overview.to_path_buf()),
-        summary_model: cli.summary_model.clone(),
         from_archive: Some(dir.to_path_buf()),
-        charts: false,
         track_lp: true,
-        state_dir: cli.state_dir.clone(),
         analyze: None,
-        no_overview: true,
         edit,
         tick: false,
-        journal_import: false,
         accounts: cli.accounts.clone(),
         archive: cli.archive.clone(),
         journal: cli.journal.clone(),
@@ -567,90 +579,6 @@ fn parse_accounts(path: &Path, default_queue: Option<u32>) -> Result<Vec<Account
     Ok(accounts)
 }
 
-/// Backfill the journal from the marker files a pre-journal poller left in
-/// the archive (`.posted-*`, `.message-id`, `.clip-*`) and the `state/lp`
-/// snapshots — a one-shot cutover, refused once the journal has events.
-pub fn import_legacy_state(cli: &Cli) -> Result<()> {
-    let journal = Journal::open(&cli.journal)?;
-    if !journal.is_empty()? {
-        // Already imported: the remaining legacy value is post-time LP lines
-        // written before game_posted carried them. Backfill just those, as
-        // idempotent re-appends (last post wins in the fold).
-        return backfill_rank_lines(cli, &journal);
-    }
-    let accounts = parse_accounts(&cli.accounts, None)?;
-
-    let mut games = 0usize;
-    for dir in archive_dirs(&cli.archive)? {
-        let platform = dir.parent().and_then(|p| p.file_name()).and_then(|n| n.to_str()).unwrap_or("").to_string();
-        let Some(game_id) = dir.file_name().and_then(|n| n.to_str()).and_then(|n| n.parse::<u64>().ok()) else {
-            continue;
-        };
-        let message_id = std::fs::read_to_string(dir.join(".message-id")).unwrap_or_default().trim().to_string();
-        let queue_id = read_queue_id(&dir).unwrap_or(0);
-        let rank: Option<crate::stats::RankInfo> =
-            std::fs::read_to_string(dir.join(".rank.json")).ok().and_then(|json| serde_json::from_str(&json).ok());
-
-        for account in &accounts {
-            if dir.join(format!(".posted-{}", slug(&account.riot_id))).exists() {
-                journal.append(&crate::journal::GamePosted {
-                    platform: platform.clone(),
-                    game_id,
-                    riot_id: account.riot_id.clone(),
-                    queue_id,
-                    message_id: message_id.clone(),
-                    rank: rank.clone(),
-                    puuid: None,
-                })?;
-                games += 1;
-            }
-        }
-
-        let has_clips = dir.join("highlight.mp4").exists() || dir.join("lowlight.mp4").exists();
-        let tries: u32 =
-            std::fs::read_to_string(dir.join(".clips-tries")).ok().and_then(|t| t.trim().parse().ok()).unwrap_or(0);
-        if tries > 0 {
-            journal.append(&ClipAttempt { platform: platform.clone(), game_id, try_number: tries, riot_id: None })?;
-        }
-        if dir.join(".clips-done").exists() {
-            if has_clips {
-                journal.append(&ClipsAttached { platform: platform.clone(), game_id, riot_id: None })?;
-            } else {
-                journal.append(&ClipsAbandoned { platform: platform.clone(), game_id, tries, riot_id: None })?;
-            }
-        }
-    }
-
-    let mut baselines = 0usize;
-    for entry in std::fs::read_dir(&cli.state_dir).into_iter().flatten().flatten() {
-        let path = entry.path();
-        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        let Some((puuid, queue)) = stem.rsplit_once('_') else {
-            continue;
-        };
-        let Ok(queue_id) = queue.parse::<u32>() else {
-            continue;
-        };
-        let Some(snapshot) = crate::rank::read_snapshot(&path) else {
-            continue;
-        };
-        journal.append(&crate::journal::RankObserved {
-            puuid: puuid.to_string(),
-            riot_id: String::new(),
-            queue_id,
-            ladder_value: snapshot.value,
-            label: snapshot.label,
-            lp: snapshot.lp,
-        })?;
-        baselines += 1;
-    }
-
-    tracing::info!(games, baselines, journal = %cli.journal.display(), "imported legacy state");
-    Ok(())
-}
-
 /// Mark clip jobs abandoned for explicitly named match ids — games whose
 /// replay aged out of the patch, or whose post was removed. Idempotent: a
 /// finished job is skipped.
@@ -670,68 +598,6 @@ pub fn abandon_clips(cli: &Cli) -> Result<()> {
         tracing::info!(%match_id, "clip jobs abandoned");
     }
     Ok(())
-}
-
-/// Re-append `game_posted` (same identity, plus the legacy `.rank.json` LP
-/// line) for already-posted games the journal has no rank line for — so a
-/// clip-attach edit reproduces the post-time LP line without the file.
-fn backfill_rank_lines(cli: &Cli, journal: &Journal) -> Result<()> {
-    let projection = journal.fold()?;
-    let mut backfilled = 0usize;
-    for dir in archive_dirs(&cli.archive)? {
-        let platform = dir.parent().and_then(|p| p.file_name()).and_then(|n| n.to_str()).unwrap_or("").to_string();
-        let Some(game_id) = dir.file_name().and_then(|n| n.to_str()).and_then(|n| n.parse::<u64>().ok()) else {
-            continue;
-        };
-        let Some(rank) = std::fs::read_to_string(dir.join(".rank.json"))
-            .ok()
-            .and_then(|json| serde_json::from_str::<crate::stats::RankInfo>(&json).ok())
-        else {
-            continue;
-        };
-        for job in projection.clip_jobs(&platform, game_id) {
-            if job.done || projection.rank_line(&platform, game_id, &job.riot_id).is_some() {
-                continue; // A finished job never edits again; a lined one is set.
-            }
-            let Some(message_id) = projection.message_id(&platform, game_id, &job.riot_id) else {
-                continue;
-            };
-            journal.append(&crate::journal::GamePosted {
-                platform: platform.clone(),
-                game_id,
-                riot_id: job.riot_id.clone(),
-                queue_id: read_queue_id(&dir).unwrap_or(0),
-                message_id: message_id.to_string(),
-                rank: Some(rank.clone()),
-                puuid: None,
-            })?;
-            backfilled += 1;
-        }
-    }
-    tracing::info!(backfilled, "journal already imported; backfilled legacy rank lines for pending clip edits");
-    Ok(())
-}
-
-/// `archive/<platform>/<game_id>` directories.
-fn archive_dirs(root: &Path) -> Result<Vec<PathBuf>> {
-    let mut dirs = Vec::new();
-    for platform in std::fs::read_dir(root).into_iter().flatten().flatten() {
-        if platform.path().is_dir() {
-            for game in std::fs::read_dir(platform.path()).into_iter().flatten().flatten() {
-                if game.path().is_dir() {
-                    dirs.push(game.path());
-                }
-            }
-        }
-    }
-    Ok(dirs)
-}
-
-/// The queue id of an archived game, from its `match.json`.
-fn read_queue_id(dir: &Path) -> Option<u32> {
-    let raw = std::fs::read_to_string(dir.join("match.json")).ok()?;
-    let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    u32::try_from(value.get("info")?.get("queueId")?.as_u64()?).ok()
 }
 
 /// The watch list's riot ids, for joint clip-pick assignment across tracked

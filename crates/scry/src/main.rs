@@ -1,13 +1,11 @@
 mod analysis;
 mod archive;
-mod charts;
 mod cli;
 mod discord;
 mod journal;
 mod rank;
 mod riot;
 mod stats;
-mod summary;
 mod tick;
 
 use std::fs;
@@ -35,11 +33,6 @@ async fn run(cli: Cli) -> Result<()> {
     // One full poll pass over the watch list (the poll.sh loop body).
     if cli.tick {
         return tick::run(&cli).await;
-    }
-
-    // One-shot cutover from the marker-file state to the journal.
-    if cli.journal_import {
-        return tick::import_legacy_state(&cli);
     }
 
     // Journal inspection / clip-job hygiene.
@@ -102,35 +95,81 @@ async fn run(cli: Cli) -> Result<()> {
             tracing::warn!(%match_id, "player not found in match participants; skipping");
             continue;
         };
-        webhook.post(&discord::stats_message(&match_summary, None, None, None, None), &[]).await?; // live posting doesn't track the message id
+        webhook.post(&discord::stats_message(&match_summary, None, None, None), &[]).await?; // live posting doesn't track the message id
         tracing::info!(%match_id, "posted summary");
     }
 
     Ok(())
 }
 
-/// Run the causal analysis over a dumped match directory and print the
-/// classified moments. Uses only the archived files — no Riot API.
-fn analyze_archive(riot_id: &str, dir: &Path, roster: &[String]) -> Result<()> {
+/// Read an archived match directory: the parsed `match.json` plus the raw
+/// timeline-events JSONL.
+fn read_archive(dir: &Path) -> Result<(Match, String)> {
     let raw = fs::read_to_string(dir.join("match.json"))
         .with_context(|| format!("reading {}", dir.join("match.json").display()))?;
     let game: Match = serde_json::from_str(&raw).context("parsing match.json into match-v5")?;
     let events = fs::read_to_string(dir.join("timeline-events.jsonl"))
         .with_context(|| format!("reading {}", dir.join("timeline-events.jsonl").display()))?;
+    Ok((game, events))
+}
 
+/// The archived participant matching a Riot ID, by PUUID. Riot IDs are
+/// case-insensitive; match data stores the registered casing (often
+/// lowercase), so compare without case.
+fn find_puuid(game: &Match, riot_id: &str) -> Option<String> {
     let (name, tag) = riot_id.split_once('#').unwrap_or((riot_id, ""));
-    let puuid = game
-        .info
+    game.info
         .participants
         .iter()
         .find(|p| {
-            // Riot IDs are case-insensitive; match data stores the registered
-            // casing (often lowercase), so compare without case.
             p.riot_id_game_name.as_deref().is_some_and(|n| n.eq_ignore_ascii_case(name))
                 && p.riot_id_tagline.as_deref().is_some_and(|t| t.eq_ignore_ascii_case(tag))
         })
         .map(|p| p.puuid.clone())
-        .ok_or_else(|| anyhow!("player {} not found in {}", riot_id, dir.display()))?;
+}
+
+/// Compute one tracked player's clip picks for an archived game — assigned
+/// jointly across every tracked player in the lobby so a shared teamfight
+/// doesn't become N near-identical clips — and journal them as
+/// `picks_assigned`, the record the post's captions and the recorder's clip
+/// windows read. Returns the appended event.
+fn journal_picks(
+    journal: &journal::Journal,
+    riot_id: &str,
+    dir: &Path,
+    roster: &[String],
+) -> Result<journal::PicksAssigned> {
+    let (game, events) = read_archive(dir)?;
+    let puuid = find_puuid(&game, riot_id).ok_or_else(|| anyhow!("player {riot_id} not found in {}", dir.display()))?;
+
+    let mut tracked = tracked_puuids(&game, roster);
+    if !tracked.contains(&puuid) {
+        tracked.push(puuid.clone());
+    }
+    let picks = analysis::assign_picks(&game, &events, &tracked);
+    let (highlight, lowlight) =
+        picks.into_iter().find(|(p, _, _)| *p == puuid).map(|(_, h, l)| (h, l)).unwrap_or((None, None));
+
+    let (platform, game_id) = tick::split_match_id(&game.metadata.match_id)
+        .with_context(|| format!("archive {} has a malformed match id", dir.display()))?;
+    let event = journal::PicksAssigned {
+        platform: platform.to_string(),
+        game_id,
+        riot_id: riot_id.to_string(),
+        puuid,
+        highlight: highlight.as_ref().map(Into::into),
+        lowlight: lowlight.as_ref().map(Into::into),
+    };
+    journal.append(&event)?;
+    Ok(event)
+}
+
+/// Run the causal analysis over a dumped match directory and print the
+/// classified moments and clip picks. Uses only the archived files — no Riot
+/// API, no journal write.
+fn analyze_archive(riot_id: &str, dir: &Path, roster: &[String]) -> Result<()> {
+    let (game, events) = read_archive(dir)?;
+    let puuid = find_puuid(&game, riot_id).ok_or_else(|| anyhow!("player {riot_id} not found in {}", dir.display()))?;
 
     let moments = analysis::analyze(&game, &events, &puuid);
     for m in &moments {
@@ -151,24 +190,6 @@ fn analyze_archive(riot_id: &str, dir: &Path, roster: &[String]) -> Result<()> {
         }
     }
 
-    // Write the grounded-facts brief the OVERVIEW prompt consumes, including the
-    // Highlight/Lowlight clip candidates it chooses a timestamp from.
-    let (highlights, lowlights) = analysis::clip_candidates(&game, &events, &puuid);
-    let md = analysis::render_moments_md(&moments, &highlights, &lowlights, name);
-    let suffix = format!("-{}", tick::slug(riot_id));
-    let out = dir.join(format!("moments{suffix}.md"));
-    fs::write(&out, md).with_context(|| format!("writing {}", out.display()))?;
-
-    // Sidecar the per-candidate clip windows (seek + duration) keyed by m:ss, so
-    // highlight.sh records a window sized to each play rather than a flat length.
-    let clips = analysis::render_clips_json(&highlights, &lowlights);
-    fs::write(dir.join(format!("clips{suffix}.json")), clips)
-        .with_context(|| format!("writing clips{suffix}.json in {}", dir.display()))?;
-
-    // The deterministic clip pick, assigned jointly across every tracked
-    // player in this game so a shared teamfight doesn't become N
-    // near-identical clips: the strongest claim takes its moment, others
-    // divert to their best free alternative when it's worth taking.
     let mut tracked = tracked_puuids(&game, roster);
     if !tracked.contains(&puuid) {
         tracked.push(puuid.clone());
@@ -176,13 +197,14 @@ fn analyze_archive(riot_id: &str, dir: &Path, roster: &[String]) -> Result<()> {
     let picks = analysis::assign_picks(&game, &events, &tracked);
     let (highlight, lowlight) =
         picks.into_iter().find(|(p, _, _)| *p == puuid).map(|(_, h, l)| (h, l)).unwrap_or((None, None));
-    fs::write(
-        dir.join(format!("overview{suffix}.md")),
-        analysis::render_picks_md(highlight.as_ref(), lowlight.as_ref()),
-    )
-    .with_context(|| format!("writing overview{suffix}.md in {}", dir.display()))?;
-
-    println!("\n{} moments -> {}", moments.len(), out.display());
+    for (side, pick) in [("highlight", highlight), ("lowlight", lowlight)] {
+        match pick {
+            Some(c) => {
+                println!("{side}: {} — {} (seek {}s, {}s)", analysis::mmss(c.t_ms), c.summary, c.seek_s, c.dur_s)
+            }
+            None => println!("{side}: none"),
+        }
+    }
     Ok(())
 }
 
@@ -206,8 +228,8 @@ fn tracked_puuids(game: &Match, roster: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// Build and post the stats + coach package from a dumped match directory,
-/// using only the archived `match.json` (and an optional `--summary` file).
+/// Build and post the stats + clips package from a dumped match directory,
+/// using the archived `match.json` and the journal's picks for the captions.
 async fn post_from_archive(cli: &Cli, dir: &Path) -> Result<()> {
     let raw = fs::read_to_string(dir.join("match.json"))
         .with_context(|| format!("reading {}", dir.join("match.json").display()))?;
@@ -215,18 +237,7 @@ async fn post_from_archive(cli: &Cli, dir: &Path) -> Result<()> {
 
     let riot_id = cli.require_riot_id()?;
     let (name, tag) = riot_id.split_once('#').unwrap_or((riot_id, ""));
-    let player = game
-        .info
-        .participants
-        .iter()
-        .find(|p| {
-            // Riot IDs are case-insensitive; match data stores the registered
-            // casing (often lowercase), so compare without case.
-            p.riot_id_game_name.as_deref().is_some_and(|n| n.eq_ignore_ascii_case(name))
-                && p.riot_id_tagline.as_deref().is_some_and(|t| t.eq_ignore_ascii_case(tag))
-        })
-        .ok_or_else(|| anyhow!("player {riot_id} not found in {}", dir.display()))?;
-    let puuid = player.puuid.clone();
+    let puuid = find_puuid(&game, riot_id).ok_or_else(|| anyhow!("player {riot_id} not found in {}", dir.display()))?;
 
     let ctx = stats::RenderContext {
         region_slug: riot::web_region_slug(&game.info.platform_id),
@@ -275,23 +286,7 @@ async fn post_from_archive(cli: &Cli, dir: &Path) -> Result<()> {
         }
     }
 
-    // Render the dashboard first so the message can reference the attachment.
     let mut attachments: Vec<discord::Attachment> = Vec::new();
-    let chart = if cli.charts {
-        let charts_dir = dir.join("charts");
-        fs::create_dir_all(&charts_dir).with_context(|| format!("creating {}", charts_dir.display()))?;
-        let frames = fs::read_to_string(dir.join("timeline-frames.jsonl"))
-            .with_context(|| format!("reading {}", dir.join("timeline-frames.jsonl").display()))?;
-        let events = fs::read_to_string(dir.join("timeline-events.jsonl"))
-            .with_context(|| format!("reading {}", dir.join("timeline-events.jsonl").display()))?;
-        let png_path = charts_dir.join("dashboard.png");
-        charts::dashboard(&game, &frames, &events, &puuid, &png_path)?;
-        let bytes = fs::read(&png_path).with_context(|| format!("reading {}", png_path.display()))?;
-        attachments.push(discord::Attachment { filename: "dashboard.png".to_string(), bytes });
-        Some("dashboard.png")
-    } else {
-        None
-    };
 
     // Embed this player's Highlight/Lowlight clips if they've been recorded
     // into the archive dir; the unsuffixed names are the legacy fallback for
@@ -312,7 +307,6 @@ async fn post_from_archive(cli: &Cli, dir: &Path) -> Result<()> {
     };
     let highlight = embed_clip("highlight")?;
     let lowlight = embed_clip("lowlight")?;
-    let (highlight, lowlight) = (highlight.as_deref(), lowlight.as_deref());
 
     // An old game's replay dies at Riot's patch boundary — say so on the post
     // instead of leaving the clips forever pending (backfills of a player's
@@ -328,22 +322,16 @@ async fn post_from_archive(cli: &Cli, dir: &Path) -> Result<()> {
         None
     };
 
-    // With an overview, stats + separator + overview are one CV2 container.
-    // --no-overview renders a minimal header + stats + clips embed instead
-    // (the summary is still parsed, for the clip captions).
-    let message = if let Some(summary_path) = cli.summary.as_deref() {
-        let md =
-            fs::read_to_string(summary_path).with_context(|| format!("reading summary {}", summary_path.display()))?;
-        let summary = summary::parse(&md);
-        let model = (!cli.summary_model.is_empty()).then_some(cli.summary_model.as_str());
-        if cli.no_overview {
-            discord::clips_message(&match_summary, &summary, model, highlight, lowlight, clip_note)
-        } else {
-            discord::combined_message(&match_summary, &summary, model, chart, highlight, lowlight)
-        }
-    } else {
-        discord::stats_message(&match_summary, chart, highlight, lowlight, clip_note)
+    // Captions come from the journaled picks for this perspective (absent for
+    // a clip recorded before the picks event existed — the clip still embeds,
+    // just uncaptioned).
+    let picks = state.picks(platform, game_id, riot_id);
+    let clip = |filename: Option<String>, pick: Option<&journal::ClipPick>| {
+        filename.map(|filename| discord::Clip { filename, caption: pick.map(journal::ClipPick::caption) })
     };
+    let highlight = clip(highlight, picks.and_then(|p| p.highlight.as_ref()));
+    let lowlight = clip(lowlight, picks.and_then(|p| p.lowlight.as_ref()));
+    let message = discord::stats_message(&match_summary, highlight.as_ref(), lowlight.as_ref(), clip_note);
 
     let webhook = discord::Webhook::new(cli.webhook.clone());
     if cli.edit {

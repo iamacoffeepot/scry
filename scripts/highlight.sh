@@ -1,43 +1,38 @@
 #!/usr/bin/env bash
 #
-# Record the Highlight and Lowlight clips for an archived match and write them as
-# <archivedir>/highlight.mp4 and <archivedir>/lowlight.mp4 — artifacts that
+# Record the Highlight and Lowlight clips for an archived match and write them
+# as <archivedir>/highlight<sfx>.mp4 / lowlight<sfx>.mp4 — artifacts that
 # `scry --from-archive` auto-embeds under "Highlight" / "Lowlight" headers.
 #
-# The two moments are NOT chosen here. The OVERVIEW pass picks them from the
-# grounded candidate lists in moments.md and writes them into overview.md as
-# `## Highlight` / `## Lowlight` sections, each opening with an `m:ss` timestamp.
-# This script just reads those timestamps, loads the replay ONCE, and records a
-# clip centered on each (with a lead-in so the setup plays before the payoff),
-# then transcodes the game's native webm to a Discord-friendly mp4.
+# The moments are NOT chosen here. The analysis pass journals each tracked
+# perspective's picks (`picks_assigned`), and the tick's clip pass hands this
+# script each perspective's clip windows directly — one spec argument per
+# perspective:
 #
-# The optional <suffix> selects one tracked player's artifacts in a shared
-# game: overview<sfx>.md / clips<sfx>.json in, highlight<sfx>.mp4 /
-# lowlight<sfx>.mp4 out (empty = the legacy unsuffixed names).
+#   <suffix>|<hl_seek>,<hl_dur>|<ll_seek>,<ll_dur>
+#
+# where <suffix> selects that player's output names (e.g. `-Moon_132`) and a
+# side with no pick is an empty field. This script just loads the replay ONCE,
+# seeks each window, records it, and transcodes the game's native webm to a
+# Discord-friendly mp4.
 #
 # Requires the League CLIENT running + logged in on the match's region/patch,
 # with EnableReplayApi=1 in game.cfg. See memory/reference_lol_replay_recording.
-# Usage: scripts/highlight.sh <archivedir> [suffix]
+# Usage: scripts/highlight.sh <archivedir> <spec>…
 
 set -uo pipefail
 
-dir="${1:?usage: highlight.sh <archivedir> [suffix…]}"
+dir="${1:?usage: highlight.sh <archivedir> <suffix|hl_seek,hl_dur|ll_seek,ll_dur>…}"
 shift
-# One or more per-player artifact suffixes; the replay loads ONCE and every
-# perspective's clips record in that session (tracked players share games).
-suffixes=("$@")
-[[ ${#suffixes[@]} -eq 0 ]] && suffixes=("")
+specs=("$@")
+[[ ${#specs[@]} -eq 0 ]] && { echo "no clip specs given"; exit 0; }
 # The game resolves the record `path` from ITS own cwd, so it must be absolute.
 dir="$(cd "$dir" && pwd)"
 gid="$(basename "$dir")"        # numeric game id (e.g. 5592737881)
 
-# The per-clip seek + duration come from clips.json (written by --analyze, sized
-# to each fight so the whole play fits). PREROLL is just buffer: we seek a couple
-# seconds before the clip start and let the replay stream in before recording.
+# PREROLL is just buffer: we seek a couple seconds before the clip start and
+# let the replay stream in before recording.
 PREROLL=3
-# Fallback window (seconds) if clips.json has no entry for the chosen timestamp.
-FALLBACK_LEAD=7
-FALLBACK_DUR=18
 
 lockfile="/Applications/League of Legends.app/Contents/LoL/lockfile"
 [[ -f "$lockfile" ]] || { echo "no League client lockfile — is it running/logged in?"; exit 1; }
@@ -53,34 +48,6 @@ case "$phase" in
   *InProgress*|*ChampSelect*|*Matchmaking*|*ReadyCheck*|*GameStart*|*Reconnect*)
     echo "live game in progress ($phase) — skipping clip recording"; exit 0;;
 esac
-
-# First m:ss under a `## <section>` heading in overview.md (empty if none/absent).
-section_ts() {
-  awk -v sec="## $1" '
-    $0==sec {grab=1; next}
-    /^## / {grab=0}
-    grab && match($0, /[0-9]+:[0-9][0-9]/) { print substr($0,RSTART,RLENGTH); exit }
-  ' "$overview"
-}
-to_secs() { local t="$1"; echo $(( ${t%%:*} * 60 + 10#${t##*:} )); }
-
-# Gather each perspective's timestamps before touching the replay, so a game
-# with nothing to clip never loads it.
-work=()
-for sfx in "${suffixes[@]}"; do
-  overview="$dir/overview$sfx.md"
-  [[ -f "$overview" ]] || { echo "no overview$sfx.md — skipping that perspective"; continue; }
-  hl_ts="$(section_ts Highlight)"
-  ll_ts="$(section_ts Lowlight)"
-  if [[ -z "$hl_ts" && -z "$ll_ts" ]]; then
-    echo "no timestamps in overview$sfx.md — skipping that perspective"; continue
-  fi
-  echo "clips$sfx: highlight=${hl_ts:-none} lowlight=${ll_ts:-none}"
-  work+=("$sfx|$hl_ts|$ll_ts")
-done
-if [[ ${#work[@]} -eq 0 ]]; then
-  echo "nothing to clip"; exit 0
-fi
 
 # --- load THIS game's replay (a stale one may be up) ------------------------
 # The .rofl download verifies asynchronously (metadata state: checking -> watch);
@@ -133,27 +100,20 @@ record_clip() {
   echo "  $out ($(du -h "$out" | cut -f1))"
 }
 
-# record_ts <m:ss> <out.mp4> — resolve the clip window for this timestamp from
-# clips.json (seek + duration sized to the fight), falling back to a fixed
-# window if there's no matching entry.
-record_ts() {
-  local ts="$1" out="$2" seek dur win=""
-  [[ -f "$dir/clips$sfx.json" ]] && win="$(jq -r --arg k "$ts" '.[$k] // empty | "\(.seek) \(.dur)"' "$dir/clips$sfx.json" 2>/dev/null)"
-  if [[ -n "$win" ]]; then
-    read -r seek dur <<< "$win"
-  else
-    seek=$(( $(to_secs "$ts") - FALLBACK_LEAD )); (( seek < 0 )) && seek=0
-    dur="$FALLBACK_DUR"
-  fi
+# record_window <seek,dur> <out.mp4> — one side's window, skipped when empty.
+record_window() {
+  local window="$1" out="$2" seek dur
+  [[ -z "$window" ]] && return 0
+  IFS=, read -r seek dur <<< "$window"
   echo "  window: start=${seek}s dur=${dur}s"
   record_clip "$seek" "$dur" "$out"
 }
 
 # One loaded replay serves every perspective: seeks are cheap, loads aren't.
-for entry in "${work[@]}"; do
-  IFS='|' read -r sfx hl_ts ll_ts <<< "$entry"
-  if [[ -n "$hl_ts" ]]; then echo "recording highlight$sfx @ $hl_ts"; record_ts "$hl_ts" "$dir/highlight$sfx.mp4"; fi
-  if [[ -n "$ll_ts" ]]; then echo "recording lowlight$sfx @ $ll_ts"; record_ts "$ll_ts" "$dir/lowlight$sfx.mp4"; fi
+for spec in "${specs[@]}"; do
+  IFS='|' read -r sfx hl ll <<< "$spec"
+  if [[ -n "$hl" ]]; then echo "recording highlight$sfx"; record_window "$hl" "$dir/highlight$sfx.mp4"; fi
+  if [[ -n "$ll" ]]; then echo "recording lowlight$sfx"; record_window "$ll" "$dir/lowlight$sfx.mp4"; fi
 done
 
 # Close the replay game window (leave the client up — it serves the LCU we need

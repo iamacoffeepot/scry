@@ -2,13 +2,19 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
 use crate::stats::MatchSummary;
-use crate::summary::Summary;
 
 /// A PNG (or other) file attached to a webhook message. Reference it from a
 /// media component with `attachment://<filename>`.
 pub struct Attachment {
     pub filename: String,
     pub bytes: Vec<u8>,
+}
+
+/// One clip to embed: the attached video's filename plus the caption rendered
+/// beside it (the pick's `**m:ss** — summary` line, when the journal has one).
+pub struct Clip {
+    pub filename: String,
+    pub caption: Option<String>,
 }
 
 /// A Discord incoming webhook the message is POSTed to.
@@ -123,27 +129,18 @@ fn result_color(win: bool) -> u32 {
     }
 }
 
-/// The stats-only message (live posting and the no-overview archive case).
-pub fn stats_message(
-    s: &MatchSummary,
-    chart: Option<&str>,
-    highlight: Option<&str>,
-    lowlight: Option<&str>,
-    note: Option<&str>,
-) -> Value {
+/// The one message shape: header + stats + the captioned clips (when
+/// recorded), in one Components-V2 container whose accent keys off the result.
+pub fn stats_message(s: &MatchSummary, highlight: Option<&Clip>, lowlight: Option<&Clip>, note: Option<&str>) -> Value {
     let mut body = vec![header_section(s), text(stats_text(s))];
-    if let Some(name) = chart {
-        body.push(media(name));
-    }
-    // No overview here, so the clips carry only their header (no caption).
     if let Some(clip) = highlight {
-        clip_block(&mut body, "Highlight", None, clip);
+        clip_block(&mut body, "Highlight", clip);
     }
     if let Some(clip) = lowlight {
-        clip_block(&mut body, "Lowlight", None, clip);
+        clip_block(&mut body, "Lowlight", clip);
     }
     push_note(&mut body, note);
-    body.push(footer(None));
+    body.push(footer());
     container_message(s.win, body)
 }
 
@@ -154,71 +151,16 @@ fn push_note(body: &mut Vec<Value>, note: Option<&str>) {
     }
 }
 
-/// A minimal message: header + stats + the captioned clips, with no overview
-/// prose and no chart. `summary` is used only for the clip captions; `model`
-/// is the optional footer attribution (None when nothing generated prose).
-pub fn clips_message(
-    s: &MatchSummary,
-    summary: &Summary,
-    model: Option<&str>,
-    highlight: Option<&str>,
-    lowlight: Option<&str>,
-    note: Option<&str>,
-) -> Value {
-    let mut body = vec![header_section(s), text(stats_text(s))];
-    if let Some(clip) = highlight {
-        clip_block(&mut body, "Highlight", summary.section("Highlight"), clip);
-    }
-    if let Some(clip) = lowlight {
-        clip_block(&mut body, "Lowlight", summary.section("Lowlight"), clip);
-    }
-    push_note(&mut body, note);
-    body.push(footer(model));
-    container_message(s.win, body)
-}
-
-/// The full package: stats, a real Separator, the overview prose, and the
-/// chart — one Components-V2 container (the accent bar keys off the result).
-pub fn combined_message(
-    s: &MatchSummary,
-    summary: &Summary,
-    model: Option<&str>,
-    chart: Option<&str>,
-    highlight: Option<&str>,
-    lowlight: Option<&str>,
-) -> Value {
-    let mut body = vec![
-        header_section(s),
-        text(stats_text(s)),
-        json!({ "type": SEPARATOR, "divider": true, "spacing": 2 }),
-        text(overview_text(summary)),
-    ];
-    if let Some(name) = chart {
-        // Divider between the overview and the chart.
-        body.push(json!({ "type": SEPARATOR, "divider": true, "spacing": 2 }));
-        body.push(media(name));
-    }
-    // Clips get the caption the overview wrote for them (the m:ss + one-liner).
-    if let Some(clip) = highlight {
-        clip_block(&mut body, "Highlight", summary.section("Highlight"), clip);
-    }
-    if let Some(clip) = lowlight {
-        clip_block(&mut body, "Lowlight", summary.section("Lowlight"), clip);
-    }
-    body.push(footer(model));
-    container_message(s.win, body)
-}
-
-/// Append a captioned clip: a divider, a bold header + optional caption, then the
-/// video. `caption` is the overview's line for the clip (its m:ss + one-liner).
-fn clip_block(body: &mut Vec<Value>, header: &str, caption: Option<&str>, filename: &str) {
+/// Append a captioned clip: a divider, a bold header + optional caption, then
+/// the video.
+fn clip_block(body: &mut Vec<Value>, header: &str, clip: &Clip) {
     body.push(json!({ "type": SEPARATOR, "divider": true, "spacing": 2 }));
-    let content = match caption.map(str::trim) {
-        Some(c) if !c.is_empty() && !c.eq_ignore_ascii_case("none") => format!("**{header}** {c}"),
+    let content = match clip.caption.as_deref().map(str::trim) {
+        Some(c) if !c.is_empty() => format!("**{header}** {c}"),
         _ => format!("**{header}**"),
     };
     body.push(text(content));
-    body.push(media(filename));
+    body.push(media(&clip.filename));
 }
 
 /// Wrap child components in an accent-colored container as the whole message.
@@ -238,7 +180,7 @@ fn text(content: impl Into<String>) -> Value {
     json!({ "type": TEXT_DISPLAY, "content": content.into() })
 }
 
-/// The chart as a single-item media gallery referencing the attachment.
+/// A single-item media gallery referencing an attachment by filename.
 fn media(filename: &str) -> Value {
     json!({
         "type": MEDIA_GALLERY,
@@ -308,53 +250,9 @@ fn stats_text(s: &MatchSummary) -> String {
     )
 }
 
-/// Verdict (lead paragraph) then each remaining section under a bold heading.
-fn overview_text(summary: &Summary) -> String {
-    let mut out = String::new();
-    if let Some((_, body)) = summary.sections.iter().find(|(h, _)| h.eq_ignore_ascii_case("Verdict")) {
-        // The header already states the result; drop a leading "Victory/Defeat".
-        out.push_str(&truncate(strip_result_prefix(body), 1024));
-        out.push_str("\n\n");
-    }
-    for (heading, body) in &summary.sections {
-        // Verdict leads above; the clip captions render next to their videos.
-        let is_clip = heading.eq_ignore_ascii_case("Highlight") || heading.eq_ignore_ascii_case("Lowlight");
-        if !heading.eq_ignore_ascii_case("Verdict") && !is_clip {
-            out.push_str(&format!("**{heading}**\n{}\n\n", truncate(body, 1024)));
-        }
-    }
-    out.trim_end().to_string()
-}
-
-/// Small grey subtext footer: model attribution (if any) plus the scry brand.
-fn footer(model: Option<&str>) -> Value {
-    let content = match model {
-        Some(m) => format!("-# Generated with {m} · {FOOTER}"),
-        None => format!("-# {FOOTER}"),
-    };
-    text(content)
-}
-
-/// Drop a leading "Victory" / "Defeat" (and its trailing punctuation) from the
-/// Verdict, since the header already states the result.
-fn strip_result_prefix(s: &str) -> &str {
-    let t = s.trim_start();
-    for p in ["Victory", "Defeat"] {
-        if t.len() >= p.len() && t[..p.len()].eq_ignore_ascii_case(p) {
-            return t[p.len()..].trim_start_matches(['.', ',', ':', '—', '-', ' ']);
-        }
-    }
-    t
-}
-
-/// Truncate to at most `max` characters, appending an ellipsis if cut.
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        let kept: String = s.chars().take(max.saturating_sub(1)).collect();
-        format!("{kept}…")
-    }
+/// Small grey subtext footer: the scry brand line.
+fn footer() -> Value {
+    text(format!("-# {FOOTER}"))
 }
 
 /// Group digits with commas: `18420` -> `"18,420"`.

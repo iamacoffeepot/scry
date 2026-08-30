@@ -35,6 +35,80 @@ impl StorageLeaves for RankInfo {
     }
 }
 
+/// One chosen clip: the moment's timestamp, the replay window sized to it,
+/// and the grounded one-line caption the post renders beside the video.
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct ClipPick {
+    /// The moment's in-game time, unix-style millis from game start.
+    pub t_millis: i64,
+    /// Game-second the recording should start at (lead-in already included).
+    pub seek_secs: i64,
+    /// Recording length in seconds — sized to the fight span, capped.
+    pub duration_secs: i64,
+    /// The grounded one-liner describing the moment.
+    pub summary: String,
+}
+
+impl ClipPick {
+    /// The moment's timestamp as `m:ss` (how captions and logs render it).
+    pub fn timestamp(&self) -> String {
+        let secs = self.t_millis / 1000;
+        format!("{}:{:02}", secs / 60, secs % 60)
+    }
+
+    /// The caption the post renders beside the clip: `**m:ss** — summary`.
+    pub fn caption(&self) -> String {
+        format!("**{}** — {}", self.timestamp(), self.summary)
+    }
+}
+
+impl StorageLeaves for ClipPick {
+    fn contribute(&self, carry: u64, depth: u32, sink: &mut RecordWriter) -> Result<(), StorageError> {
+        self.t_millis.contribute(fold_path_segment(carry, b"t_millis", depth), depth + 1, sink)?;
+        self.seek_secs.contribute(fold_path_segment(carry, b"seek_secs", depth), depth + 1, sink)?;
+        self.duration_secs.contribute(fold_path_segment(carry, b"duration_secs", depth), depth + 1, sink)?;
+        self.summary.contribute(fold_path_segment(carry, b"summary", depth), depth + 1, sink)
+    }
+
+    fn assemble(carry: u64, depth: u32, source: &mut RecordReader) -> Result<Self, StorageError> {
+        Ok(Self {
+            t_millis: i64::assemble(fold_path_segment(carry, b"t_millis", depth), depth + 1, source)?,
+            seek_secs: i64::assemble(fold_path_segment(carry, b"seek_secs", depth), depth + 1, source)?,
+            duration_secs: i64::assemble(fold_path_segment(carry, b"duration_secs", depth), depth + 1, source)?,
+            summary: String::assemble(fold_path_segment(carry, b"summary", depth), depth + 1, source)?,
+        })
+    }
+
+    fn is_absent(carry: u64, depth: u32, source: &RecordReader) -> bool {
+        i64::is_absent(fold_path_segment(carry, b"t_millis", depth), depth + 1, source)
+            && i64::is_absent(fold_path_segment(carry, b"seek_secs", depth), depth + 1, source)
+            && i64::is_absent(fold_path_segment(carry, b"duration_secs", depth), depth + 1, source)
+            && String::is_absent(fold_path_segment(carry, b"summary", depth), depth + 1, source)
+    }
+}
+
+/// The deterministic clip picks for one tracked player's perspective of a
+/// game — the output of the joint assignment over every tracked player in the
+/// lobby. Journaled at analysis time; the post's captions and the recorder's
+/// clip windows read this event, never an archive file. Last write wins, so a
+/// re-analysis refreshes the picks.
+#[derive(aether_data::Storage, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[kind(name = "scry.journal.picks_assigned")]
+pub struct PicksAssigned {
+    /// Riot platform id, e.g. "NA1".
+    pub platform: String,
+    /// Numeric game id (the match id with the platform prefix stripped).
+    pub game_id: u64,
+    /// The tracked player this perspective centers on (`gameName#tagLine`).
+    pub riot_id: String,
+    /// The player's permanent PUUID (the identity the projection keys by).
+    pub puuid: String,
+    /// The best moment worth celebrating, if any scored.
+    pub highlight: Option<ClipPick>,
+    /// The best moment worth learning from, if any scored.
+    pub lowlight: Option<ClipPick>,
+}
+
 /// A game's package was posted to Discord for one tracked player.
 ///
 /// This is the dedup truth the poller consults (was this game already posted

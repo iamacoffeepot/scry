@@ -2,10 +2,15 @@
 
 How scry turns one match's raw data into *understanding*: not a stats panel, but a
 reconstruction of **what happened and why**. This is the design spec for the
-analysis layer that feeds the `OVERVIEW` prompt (and, later, the poller).
+analysis layer behind the poller's clip picks and captions.
 
-Status: design. Grounded and validated against the archived match
-`archive/NA1/5592214271` (Moon#132, Ezreal BOTTOM, a defeat, patch **16.13**).
+Status: design, implemented in `crates/scry/src/analysis.rs`. Grounded and
+validated against the archived match `archive/NA1/5592214271` (Moon#132, Ezreal
+BOTTOM, a defeat, patch **16.13**). Historical note: this layer originally fed
+an LLM `OVERVIEW` prompt that narrated the moments as prose; that path was
+retired — the pipeline is fully deterministic, and the analysis output now
+persists as typed `scry.journal.picks_assigned` events rather than markdown
+briefs.
 
 ---
 

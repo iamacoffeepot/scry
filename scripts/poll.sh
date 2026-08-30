@@ -18,14 +18,13 @@
 #   SCRY_JOURNAL    journal path            (default: state/scry.sqlite)
 #   SCRY_INTERVAL   seconds between passes  (default: 300)
 #   SCRY_QUEUE      default queue id        (default: 420 = ranked solo)
-#   SCRY_SUMMARY_MODEL  footer attribution label (default: none)
 #   SCRY_CLIPS      record replay clips 1/0  (default: 1; needs League client)
 #   CLIP_MAX_TRIES  clip retries before giving up on a game (default: 15)
 #   SCRY_BIN        scry invocation         (default: cargo run --quiet --)
 #
-# SCRY_ACCOUNTS/SCRY_ARCHIVE/SCRY_JOURNAL/SCRY_QUEUE/SCRY_SUMMARY_MODEL/
-# CLIP_MAX_TRIES are read by the binary itself (clap env); only SCRY_CLIPS
-# needs translating to a flag here.
+# SCRY_ACCOUNTS/SCRY_ARCHIVE/SCRY_JOURNAL/SCRY_QUEUE/CLIP_MAX_TRIES are read
+# by the binary itself (clap env); only SCRY_CLIPS needs translating to a flag
+# here.
 
 set -uo pipefail
 

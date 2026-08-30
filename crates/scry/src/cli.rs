@@ -7,7 +7,7 @@ use clap::Parser;
 #[command(name = "scry", version, about)]
 pub struct Cli {
     /// Riot ID in `gameName#tagLine` form, e.g. "Faker#KR1". Required except
-    /// with --tick / --journal-import, which read the watch list instead.
+    /// with --tick, which reads the watch list instead.
     #[arg(long)]
     pub riot_id: Option<String>,
 
@@ -39,51 +39,28 @@ pub struct Cli {
     #[arg(long)]
     pub dump: Option<PathBuf>,
 
-    /// Pair the posted match with an overview summary (Markdown from the
-    /// OVERVIEW prompt): its ## sections become a second embed posted alongside
-    /// the stats embed.
-    #[arg(long)]
-    pub summary: Option<PathBuf>,
-
-    /// Footer attribution label for generated prose; empty (the default) means
-    /// no attribution — the pipeline is deterministic.
-    #[arg(long, env = "SCRY_SUMMARY_MODEL", default_value = "")]
-    pub summary_model: String,
-
-    /// Post a packaged stats + coach embed from a dumped match directory
-    /// (containing match.json), using no Riot API. Pair with --summary.
+    /// Post a packaged stats + clips embed from a dumped match directory
+    /// (containing match.json), using no Riot API. Clip captions come from
+    /// the journal's picks for this perspective.
     #[arg(long)]
     pub from_archive: Option<PathBuf>,
 
-    /// Also render and attach charts (gold lead, damage, lobby ranking) as
-    /// embeds. Requires the archive to contain timeline-frames.jsonl.
-    #[arg(long)]
-    pub charts: bool,
-
     /// With --from-archive on a ranked game: fetch the player's current rank
-    /// (league-v4) and show the LP delta since the last snapshot. Needs the API.
+    /// (league-v4) and show the LP delta since the journal's last observation.
+    /// Needs the API.
     #[arg(long)]
     pub track_lp: bool,
 
-    /// Directory holding per-account LP snapshots (used with --track-lp).
-    #[arg(long, default_value = "state/lp")]
-    pub state_dir: PathBuf,
-
     /// Instead of posting, run the causal analysis over a dumped match
-    /// directory and print the classified moments. Uses no Riot API.
+    /// directory and print the classified moments and clip picks. Uses no
+    /// Riot API and writes nothing.
     #[arg(long)]
     pub analyze: Option<PathBuf>,
 
-    /// With --from-archive + --summary: render a minimal embed (header + stats +
-    /// clips) that omits the AI overview prose. The summary is still read for the
-    /// Highlight/Lowlight clip captions.
-    #[arg(long)]
-    pub no_overview: bool,
-
     /// With --from-archive: edit the message already posted for this archive
-    /// (id read from <dir>/.message-id) instead of posting a new one — used to
-    /// attach the Highlight/Lowlight clips once they've been recorded. Reuses
-    /// the post-time rank/LP from <dir>/.rank.json (no Riot API call).
+    /// (id from the journal's game_posted event) instead of posting a new
+    /// one — used to attach the Highlight/Lowlight clips once they've been
+    /// recorded. Reuses the journaled post-time rank/LP (no Riot API call).
     #[arg(long)]
     pub edit: bool,
 
@@ -92,12 +69,6 @@ pub struct Cli {
     /// journal (--journal) is the dedup and clip-job state.
     #[arg(long)]
     pub tick: bool,
-
-    /// One-shot cutover: backfill the journal from a pre-journal archive's
-    /// marker files (.posted-*, .message-id, .clip-*) and the state/lp
-    /// snapshots. Refused once the journal has events.
-    #[arg(long)]
-    pub journal_import: bool,
 
     /// Watch-list file: one `riot_id|region|queue[,queue…]` per line.
     #[arg(long, env = "SCRY_ACCOUNTS", default_value = "scripts/accounts.txt")]

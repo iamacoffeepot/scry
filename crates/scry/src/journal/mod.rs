@@ -23,7 +23,8 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 pub use kinds::{
-    AccountRenamed, AccountResolved, ClipAttempt, ClipsAbandoned, ClipsAttached, GamePosted, RankObserved,
+    AccountRenamed, AccountResolved, ClipAttempt, ClipPick, ClipsAbandoned, ClipsAttached, GamePosted, PicksAssigned,
+    RankObserved,
 };
 
 /// The append-only event log.
@@ -64,12 +65,6 @@ impl Journal {
         Ok(())
     }
 
-    /// True if the journal holds any events (guards a second `--journal-import`).
-    pub fn is_empty(&self) -> Result<bool> {
-        let count: i64 = self.conn.query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))?;
-        Ok(count == 0)
-    }
-
     /// Print every event as one JSON line: `{seq, at_millis, kind, payload}`.
     /// An unknown kind prints with a null payload rather than failing.
     pub fn dump(&self) -> Result<()> {
@@ -85,6 +80,7 @@ impl Journal {
                 ClipAttempt::NAME => serde_json::to_value(decode::<ClipAttempt>(&payload)?)?,
                 ClipsAttached::NAME => serde_json::to_value(decode::<ClipsAttached>(&payload)?)?,
                 ClipsAbandoned::NAME => serde_json::to_value(decode::<ClipsAbandoned>(&payload)?)?,
+                PicksAssigned::NAME => serde_json::to_value(decode::<PicksAssigned>(&payload)?)?,
                 AccountResolved::NAME => serde_json::to_value(decode::<AccountResolved>(&payload)?)?,
                 AccountRenamed::NAME => serde_json::to_value(decode::<AccountRenamed>(&payload)?)?,
                 _ => serde_json::Value::Null,
@@ -120,6 +116,10 @@ impl Journal {
                         projection.pins.insert(e.riot_id.to_lowercase(), puuid);
                     }
                 }
+                PicksAssigned::NAME => {
+                    let e = decode::<PicksAssigned>(payload)?;
+                    projection.pins.insert(e.riot_id.to_lowercase(), e.puuid);
+                }
                 _ => {}
             }
         }
@@ -139,6 +139,10 @@ impl Journal {
                 ClipsAbandoned::NAME => {
                     let e = decode::<ClipsAbandoned>(payload)?;
                     projection.apply_terminal(&e.platform, e.game_id, e.riot_id.as_deref());
+                }
+                PicksAssigned::NAME => {
+                    let e = decode::<PicksAssigned>(payload)?;
+                    projection.picks.insert((e.platform.clone(), e.game_id, e.puuid.clone()), e);
                 }
                 // Consumed by the pin pass above; audit-only here.
                 AccountResolved::NAME | AccountRenamed::NAME => {}
@@ -190,6 +194,9 @@ pub struct Projection {
     ranks: HashMap<(String, u32), i32>,
     /// Post-time LP line per (game, identity).
     rank_lines: HashMap<(String, u64, String), crate::stats::RankInfo>,
+    /// Clip picks per (game, identity) — the analysis output the post's
+    /// captions and the recorder's windows read. Last write wins.
+    picks: HashMap<(String, u64, String), PicksAssigned>,
 }
 
 impl Projection {
@@ -314,6 +321,11 @@ impl Projection {
         self.rank_lines.get(&(platform.to_string(), game_id, self.ident(riot_id)))
     }
 
+    /// The journaled clip picks for this player's perspective of a game.
+    pub fn picks(&self, platform: &str, game_id: u64, riot_id: &str) -> Option<&PicksAssigned> {
+        self.picks.get(&(platform.to_string(), game_id, self.ident(riot_id)))
+    }
+
     /// The previous ladder value for (puuid, queue), the LP-delta baseline.
     pub fn previous_ladder(&self, puuid: &str, queue_id: u32) -> Option<i32> {
         self.ranks.get(&(puuid.to_string(), queue_id)).copied()
@@ -374,6 +386,26 @@ mod tests {
         assert_eq!(projection.newest_posted("MOON#132", Some(420)), Some(100));
         assert_eq!(projection.newest_posted("moon#132", Some(440)), None);
         assert_eq!(projection.newest_posted("himles#9267", None), Some(101));
+
+        // Picks: journaled per (game, identity), read back for captions and
+        // clip windows; last write wins.
+        let pick = ClipPick { t_millis: 125_000, seek_secs: 118, duration_secs: 20, summary: "the outplay".into() };
+        journal2
+            .append(&PicksAssigned {
+                platform: "NA1".into(),
+                game_id: 101,
+                riot_id: "Himles#9267".into(),
+                puuid: "p-him".into(),
+                highlight: Some(pick.clone()),
+                lowlight: None,
+            })
+            .unwrap();
+        let with_picks = journal2.fold().unwrap();
+        let picks = with_picks.picks("NA1", 101, "himles#9267").expect("picks re-key through the puuid pin");
+        assert_eq!(picks.highlight, Some(pick.clone()));
+        assert_eq!(picks.lowlight, None);
+        assert_eq!(pick.caption(), "**2:05** — the outplay");
+        assert!(with_picks.picks("NA1", 100, "Moon#132").is_none());
 
         // Identity: a pin re-keys name-era rows to the PUUID, so after a
         // rename the NEW name still sees the old posts and floors.

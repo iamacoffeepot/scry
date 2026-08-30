@@ -4,8 +4,6 @@
 //! catalog games in chronological order (one ranked game per poll interval).
 
 use riven::consts::Queue;
-use serde::{Deserialize, Serialize};
-use std::path::Path;
 
 /// Current ranked standing in one queue. Tier and division stay the raw
 /// league-v4 strings ("GOLD", "II") so a tier this build has never heard of
@@ -86,19 +84,4 @@ pub fn queue_type(queue: Queue) -> Option<&'static str> {
         710 => Some("RANKED_PREMADE_5x5"),
         _ => None,
     }
-}
-
-/// A legacy `state/lp` snapshot — the ladder value (for diffing) plus readable
-/// context. Superseded by the journal's `rank_observed` events; read only by
-/// `--journal-import`'s one-shot backfill.
-#[derive(Serialize, Deserialize)]
-pub struct Snapshot {
-    pub value: i32,
-    pub label: String,
-    pub lp: i32,
-}
-
-/// A legacy snapshot's contents, if the file parses.
-pub fn read_snapshot(path: &Path) -> Option<Snapshot> {
-    serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
 }

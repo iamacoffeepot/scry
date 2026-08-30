@@ -13,9 +13,9 @@
 
 use riven::consts::Team;
 use riven::models::match_v5::Match;
-use serde_json::{Value, json};
+use serde_json::Value;
 
-/// A classified, already-grounded moment ready to hand to the OVERVIEW prompt.
+/// A classified, already-grounded moment.
 #[derive(Debug, Clone)]
 pub struct Moment {
     /// Game time of the moment, ms from start.
@@ -174,64 +174,6 @@ fn parse_timeline(events_jsonl: &str, team_of: &[(i32, i32)]) -> Timeline {
     specials.sort_by_key(|s| s.t);
     objectives.sort_by_key(|o| o.t);
     Timeline { kills, specials, objectives, first_blood }
-}
-
-/// Render the moments as an authoritative grounded-facts brief for the OVERVIEW
-/// prompt: a chronological list plus the aggregate player signals.
-pub fn render_moments_md(
-    moments: &[Moment],
-    highlights: &[Candidate],
-    lowlights: &[Candidate],
-    player: &str,
-) -> String {
-    let mut out = String::new();
-    out.push_str("# Grounded analysis (precomputed — authoritative)\n\n");
-    out.push_str(&format!(
-        "These causal facts were computed directly from the match timeline, centered on \
-         **{player}**. Treat them as ground truth: build the overview from them, and do not \
-         recompute, contradict, or invent beyond them. Use the raw files only for color \
-         (champion matchups, item/level context), never to override a fact below.\n\n",
-    ));
-
-    out.push_str("## Decisive moments (chronological)\n");
-    for m in moments {
-        out.push_str(&format!("- {} — {}\n", mmss(m.t_ms), m.summary));
-    }
-
-    let deaths = moments.iter().filter(|m| matches!(m.kind, MomentKind::Death { .. })).count();
-    let free = moments.iter().filter(|m| matches!(m.kind, MomentKind::Death { free: true })).count();
-    out.push_str("\n## Player signals\n");
-    if deaths > 0 {
-        out.push_str(&format!("- Deaths: {deaths}, of which {free} were free (died with no trade)\n"));
-    }
-    for m in moments {
-        match m.kind {
-            MomentKind::Nemesis | MomentKind::ObjectiveAbsence => {
-                out.push_str(&format!("- {}\n", m.summary));
-            }
-            _ => {}
-        }
-    }
-
-    // Clip anchors: the OVERVIEW prompt picks one of each and echoes its m:ss.
-    out.push_str("\n## Highlight candidates (ranked; the pick takes the best-scored)\n");
-    render_candidates(&mut out, highlights);
-    out.push_str("\n## Lowlight candidates (ranked; the pick takes the best-scored)\n");
-    render_candidates(&mut out, lowlights);
-
-    out
-}
-
-/// Render a candidate list as `- m:ss — summary`, or a `(none)` marker so the
-/// prompt knows to write `none` for that clip.
-fn render_candidates(out: &mut String, candidates: &[Candidate]) {
-    if candidates.is_empty() {
-        out.push_str("- (none — no clip-worthy moment)\n");
-        return;
-    }
-    for c in candidates {
-        out.push_str(&format!("- {} — {}\n", mmss(c.t_ms), c.summary));
-    }
 }
 
 // --- fight -> objective conversion ------------------------------------------
@@ -660,19 +602,6 @@ fn lowlight_candidates(tl: &Timeline, pid: i32, pteam: i32, game: &Match, ctx: &
     top_candidates(scored)
 }
 
-/// Render one player's assigned picks: each as a `## <section>` holding
-/// `**m:ss** — summary` — the timestamp `highlight.sh` reads and the caption
-/// the post renders. A side with no pick gets no section (skipped clip).
-pub fn render_picks_md(highlight: Option<&Candidate>, lowlight: Option<&Candidate>) -> String {
-    let mut out = String::new();
-    for (heading, pick) in [("Highlight", highlight), ("Lowlight", lowlight)] {
-        if let Some(best) = pick {
-            out.push_str(&format!("## {heading}\n**{}** — {}\n\n", mmss(best.t_ms), best.summary));
-        }
-    }
-    out
-}
-
 /// Jointly assign every tracked player in the game their Highlight and
 /// Lowlight picks, spreading picks across distinct moments: a shared
 /// teamfight is often several players' best-scored candidate, and N
@@ -751,17 +680,6 @@ fn overlaps(candidate: &Candidate, (start, end): (i64, i64)) -> bool {
     let (c_start, c_end) = (candidate.seek_s, candidate.seek_s + candidate.dur_s);
     let overlap = c_end.min(end) - c_start.max(start);
     overlap * 2 > candidate.dur_s.min(end - start)
-}
-
-/// Render the clip windows as JSON keyed by `m:ss`, so `highlight.sh` can look
-/// up the exact seek + duration for the timestamp it was handed:
-/// `{"22:06": {"seek": 1319, "dur": 32}, ...}`.
-pub fn render_clips_json(highlights: &[Candidate], lowlights: &[Candidate]) -> String {
-    let mut map = serde_json::Map::new();
-    for c in highlights.iter().chain(lowlights) {
-        map.insert(mmss(c.t_ms), json!({ "seek": c.seek_s, "dur": c.dur_s }));
-    }
-    serde_json::to_string_pretty(&Value::Object(map)).unwrap_or_else(|_| "{}".to_string())
 }
 
 /// Sort `(score, candidate)` pairs descending and keep the top few, in
@@ -850,10 +768,9 @@ struct Special {
 }
 
 /// A candidate clip moment: an exact game-time anchor plus a grounded
-/// one-liner. The deterministic pick ([`render_overview_md`]) takes the
-/// best-scored candidate of each list; the ranked lists land in `moments.md`
-/// as a record. `seek_s`/`dur_s` describe the video window to record so the
-/// whole play fits.
+/// one-liner. The deterministic pick ([`assign_picks`]) takes the best-scored
+/// candidate of each list, jointly across tracked players. `seek_s`/`dur_s`
+/// describe the video window to record so the whole play fits.
 #[derive(Debug, Clone)]
 pub struct Candidate {
     pub t_ms: i64,
@@ -864,6 +781,12 @@ pub struct Candidate {
     pub summary: String,
     /// The grounded score the pick maximizes.
     pub score: i64,
+}
+
+impl From<&Candidate> for crate::journal::ClipPick {
+    fn from(c: &Candidate) -> Self {
+        Self { t_millis: c.t_ms, seek_secs: c.seek_s, duration_secs: c.dur_s, summary: c.summary.clone() }
+    }
 }
 
 /// Seconds of lead-in before the play and tail after it, and the hard cap on a
@@ -1107,7 +1030,7 @@ fn dist(x0: f64, y0: f64, x1: f64, y1: f64) -> f64 {
 }
 
 /// Format ms-from-start as `m:ss`.
-fn mmss(ms: i64) -> String {
+pub(crate) fn mmss(ms: i64) -> String {
     let secs = ms / 1000;
     format!("{}:{:02}", secs / 60, secs % 60)
 }
@@ -1151,15 +1074,6 @@ mod tests {
         let c_cands = vec![candidate(605, 9, "the same teamfight again"), candidate(900, 2, "farming")];
         let picks = assign_side(&[("a", a_cands.as_slice()), ("c", c_cands.as_slice())]);
         assert_eq!(picks["c"].summary, "the same teamfight again", "no worthwhile alternative");
-    }
-
-    #[test]
-    fn picks_render_by_section() {
-        let best = Candidate { t_ms: 125_000, seek_s: 118, dur_s: 20, summary: "the outplay".to_string(), score: 9 };
-        let md = render_picks_md(Some(&best), None);
-        assert!(md.contains("**2:05** — the outplay"), "{md}");
-        assert!(md.starts_with("## Highlight"));
-        assert!(!md.contains("## Lowlight"), "no lowlight pick, no section");
     }
 
     #[test]
