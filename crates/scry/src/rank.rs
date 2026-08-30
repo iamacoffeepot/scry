@@ -82,6 +82,8 @@ pub fn queue_type(queue: Queue) -> Option<&'static str> {
     match queue.0 {
         420 => Some("RANKED_SOLO_5x5"),
         440 => Some("RANKED_FLEX_SR"),
+        // Ranked 5v5 (premade teams, queue 710) — its own league-v4 ladder.
+        710 => Some("RANKED_PREMADE_5x5"),
         _ => None,
     }
 }

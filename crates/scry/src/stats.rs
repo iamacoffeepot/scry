@@ -139,6 +139,7 @@ fn queue_name(id: u16) -> &'static str {
     match id {
         400 => "Normal Draft",
         420 => "Ranked Solo",
+        710 => "Ranked 5v5",
         430 => "Normal Blind",
         440 => "Ranked Flex",
         450 => "ARAM",
