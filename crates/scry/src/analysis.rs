@@ -81,6 +81,8 @@ struct Timeline {
     kills: Vec<KillEv>,
     specials: Vec<Special>,
     objectives: Vec<Objective>,
+    /// The game's first blood `(timestamp, killer)`, when the event appeared.
+    first_blood: Option<(i64, i32)>,
 }
 
 /// Parse the raw event stream into typed kills, special-kills (multikills), and
@@ -89,6 +91,7 @@ fn parse_timeline(events_jsonl: &str, team_of: &[(i32, i32)]) -> Timeline {
     let mut kills: Vec<KillEv> = Vec::new();
     let mut specials: Vec<Special> = Vec::new();
     let mut objectives: Vec<Objective> = Vec::new();
+    let mut first_blood: Option<(i64, i32)> = None;
     for line in events_jsonl.lines() {
         let line = line.trim();
         if line.is_empty() {
@@ -116,15 +119,22 @@ fn parse_timeline(events_jsonl: &str, team_of: &[(i32, i32)]) -> Timeline {
                     y: ev.pointer("/position/y").and_then(Value::as_f64).unwrap_or(0.0),
                 });
             }
-            // Only KILL_MULTI carries a multikill length; the rest (first blood,
-            // ace) aren't clip anchors on their own.
-            Some("CHAMPION_SPECIAL_KILL") if ev.get("killType").and_then(Value::as_str) == Some("KILL_MULTI") => {
-                specials.push(Special {
+            // KILL_MULTI carries a multikill length; KILL_FIRST_BLOOD marks
+            // the game's first kill (a small scoring bonus).
+            Some("CHAMPION_SPECIAL_KILL") => match ev.get("killType").and_then(Value::as_str) {
+                Some("KILL_MULTI") => specials.push(Special {
                     t: ev.get("timestamp").and_then(Value::as_i64).unwrap_or(0),
                     killer: ev.get("killerId").and_then(Value::as_i64).unwrap_or(0) as i32,
                     len: ev.get("multiKillLength").and_then(Value::as_i64).unwrap_or(0),
-                });
-            }
+                }),
+                Some("KILL_FIRST_BLOOD") => {
+                    first_blood = Some((
+                        ev.get("timestamp").and_then(Value::as_i64).unwrap_or(0),
+                        ev.get("killerId").and_then(Value::as_i64).unwrap_or(0) as i32,
+                    ));
+                }
+                _ => {}
+            },
             Some("ELITE_MONSTER_KILL") => {
                 let team = ev.get("killerTeamId").and_then(Value::as_i64).unwrap_or(0) as i32;
                 // 0/300 are neutral-despawn sentinels — nobody secured it.
@@ -133,6 +143,8 @@ fn parse_timeline(events_jsonl: &str, team_of: &[(i32, i32)]) -> Timeline {
                         t: ev.get("timestamp").and_then(Value::as_i64).unwrap_or(0),
                         team,
                         monster: monster_kind(&ev),
+                        killer: ev.get("killerId").and_then(Value::as_i64).unwrap_or(0) as i32,
+                        elder: ev.pointer("/monsterSubType").and_then(Value::as_str) == Some("ELDER_DRAGON"),
                         label: monster_label(&ev),
                         participants: monster_participants(&ev),
                     });
@@ -147,6 +159,8 @@ fn parse_timeline(events_jsonl: &str, team_of: &[(i32, i32)]) -> Timeline {
                         t: ev.get("timestamp").and_then(Value::as_i64).unwrap_or(0),
                         team,
                         monster: Monster::Building,
+                        killer: 0,
+                        elder: false,
                         label: building_label(&ev),
                         participants: Vec::new(),
                     });
@@ -159,7 +173,7 @@ fn parse_timeline(events_jsonl: &str, team_of: &[(i32, i32)]) -> Timeline {
     kills.sort_by_key(|k| k.t);
     specials.sort_by_key(|s| s.t);
     objectives.sort_by_key(|o| o.t);
-    Timeline { kills, specials, objectives }
+    Timeline { kills, specials, objectives, first_blood }
 }
 
 /// Render the moments as an authoritative grounded-facts brief for the OVERVIEW
@@ -359,6 +373,8 @@ const PUNISH_WINDOW_MS: i64 = 30_000;
 /// After a fight ends, the player must survive this long for it to read as a
 /// clean "walked away" highlight.
 const SURVIVE_AFTER_MS: i64 = 8_000;
+/// A fight or death this close to the game's end decided it.
+const CLOSING_WINDOW_MS: i64 = 90_000;
 /// A death this soon after the previous one reads as compounding the throw.
 const REPEAT_DEATH_MS: i64 = 60_000;
 
@@ -372,12 +388,31 @@ pub fn clip_candidates(game: &Match, events_jsonl: &str, puuid: &str) -> (Vec<Ca
     };
     let pid = player.participant_id;
     let pteam = team_i32(player.team_id);
-    (highlight_candidates(&tl, pid, pteam), lowlight_candidates(&tl, pid, pteam, game))
+    let ctx = ScoreContext {
+        // CC that actually held enemies (seconds) — the timeline has no CC
+        // events, so this match-detail aggregate is the playmaker signal.
+        cc_seconds: i64::from(player.time_ccing_others),
+        end_ms: game.info.game_duration * 1000,
+    };
+    let mut highlights = highlight_candidates(&tl, pid, pteam, &ctx);
+    highlights.extend(objective_candidates(&tl, pid, pteam, &ctx));
+    (
+        top_candidates(highlights.into_iter().map(|c| (c.score, c)).collect()),
+        lowlight_candidates(&tl, pid, pteam, game, &ctx),
+    )
+}
+
+/// Per-player scoring context beyond the timeline itself.
+struct ScoreContext {
+    /// Match-detail `timeCCingOthers`: seconds the player's CC held enemies.
+    cc_seconds: i64,
+    /// Game end in timeline milliseconds (the closing-fight bonus window).
+    end_ms: i64,
 }
 
 /// The player's best plays: fights they were central to, scored on kills/assists,
 /// kill gold, multikills, survival, and whether an objective followed.
-fn highlight_candidates(tl: &Timeline, pid: i32, pteam: i32) -> Vec<Candidate> {
+fn highlight_candidates(tl: &Timeline, pid: i32, pteam: i32, ctx: &ScoreContext) -> Vec<Candidate> {
     let mut scored: Vec<(i64, Candidate)> = Vec::new();
     for range in cluster_kill_indices(&tl.kills) {
         let fight = &tl.kills[range];
@@ -427,19 +462,46 @@ fn highlight_candidates(tl: &Timeline, pid: i32, pteam: i32) -> Vec<Candidate> {
         }
         // A fight at 30 minutes decides more than the same fight at 8.
         score += start / 600_000;
+        // Playmaker weighting: assists count double when the player ran the
+        // fight — most of the team's kills bear their mark — or when their
+        // CC held enemies long enough to read as the engage/peel archetype
+        // (the timeline has no CC events; the aggregate is the signal).
+        let team_kills = fight.iter().filter(|k| k.killer_team == pteam).count();
+        let ran_the_fight = passists >= 2 && passists * 2 >= team_kills;
+        if ran_the_fight || ctx.cc_seconds >= 30 {
+            score += passists as i64;
+        }
+        // First blood in this fight, by the player.
+        let first_blood =
+            tl.first_blood.is_some_and(|(t, killer)| killer == pid && t >= start - 1_000 && t <= end + 1_000);
+        if first_blood {
+            score += 3;
+        }
+        // The closing fight decided the game; the clip should tell that story.
+        let closing = end >= ctx.end_ms - CLOSING_WINDOW_MS;
+        if closing {
+            score += 6;
+        }
         if score <= 0 {
             continue;
         }
 
         // The clip spans the player's own action: from their first involved kill
         // to their last, plus lead-in/tail — so a whole multikill sequence fits.
+        // When the span outgrows the cap, anchor the window to the END: the
+        // payoff (the multikill's last kill) must survive the cut, not the
+        // opening trade.
         let involved: Vec<i64> =
             fight.iter().filter(|k| k.killer == pid || k.assists.contains(&pid)).map(|k| k.t).collect();
         let anchor = *involved.first().unwrap_or(&start);
         let last_involved = *involved.last().unwrap_or(&anchor);
-        let seek_s = (anchor / 1000 - CLIP_LEAD_S).max(0);
         let span_s = (last_involved - anchor) / 1000;
         let dur_s = (span_s + CLIP_LEAD_S + CLIP_TAIL_S).min(CLIP_MAX_S);
+        let seek_s = if span_s + CLIP_LEAD_S + CLIP_TAIL_S > CLIP_MAX_S {
+            (last_involved / 1000 + CLIP_TAIL_S - CLIP_MAX_S).max(0)
+        } else {
+            (anchor / 1000 - CLIP_LEAD_S).max(0)
+        };
 
         let multi_s = if multi >= 2 {
             format!(", a {}", multi_name(multi))
@@ -450,6 +512,16 @@ fn highlight_candidates(tl: &Timeline, pid: i32, pteam: i32) -> Vec<Candidate> {
             ", walked away"
         } else if pdeaths > 0 {
             ", but died in it"
+        } else {
+            ""
+        };
+        let fb_s = if first_blood {
+            ", first blood"
+        } else {
+            ""
+        };
+        let closing_s = if closing {
+            "; the closing fight"
         } else {
             ""
         };
@@ -465,19 +537,63 @@ fn highlight_candidates(tl: &Timeline, pid: i32, pteam: i32) -> Vec<Candidate> {
             String::new()
         };
         let summary = format!(
-            "you went {}/{}/{} in a fight{multi_s}{solo_s}{odds_s}{surv_s}{obj_s} (+{gold}g)",
+            "you went {}/{}/{} in a fight{multi_s}{solo_s}{odds_s}{fb_s}{surv_s}{obj_s}{closing_s} (+{gold}g)",
             pkills.len(),
             pdeaths,
             passists,
         );
         scored.push((score, Candidate { t_ms: anchor, seek_s, dur_s, summary, score }));
     }
-    top_candidates(scored)
+    scored.into_iter().map(|(_, c)| c).collect()
+}
+
+/// Objective secures by the player's own killing blow (the smite): Baron,
+/// Elder, drakes, Herald — the plays a kill-cluster scorer can never see.
+/// Few allied assists on a major monster reads as a steal-or-solo-secure.
+fn objective_candidates(tl: &Timeline, pid: i32, pteam: i32, ctx: &ScoreContext) -> Vec<Candidate> {
+    let mut out = Vec::new();
+    for objective in &tl.objectives {
+        if objective.killer != pid || !objective.monster.is_major() {
+            continue;
+        }
+        let mut score = match objective.monster {
+            Monster::Baron => 8,
+            Monster::Dragon if objective.elder => 9,
+            Monster::Dragon => 4,
+            Monster::Herald => 4,
+            _ => continue,
+        };
+        let allied_assists = objective.participants.iter().filter(|p| **p != pid && objective.team == pteam).count();
+        let contested = allied_assists <= 1;
+        if contested {
+            score += 6;
+        }
+        score += objective.t / 600_000;
+        let closing = objective.t >= ctx.end_ms - CLOSING_WINDOW_MS;
+        if closing {
+            score += 6;
+        }
+
+        let how = if contested {
+            "your smite, barely contested — a steal or solo secure"
+        } else {
+            "your killing blow"
+        };
+        let closing_s = if closing {
+            "; the closing take"
+        } else {
+            ""
+        };
+        let summary = format!("you secured {} ({how}){closing_s}", objective.label);
+        let seek_s = (objective.t / 1000 - CLIP_LEAD_S).max(0);
+        out.push(Candidate { t_ms: objective.t, seek_s, dur_s: CLIP_LEAD_S + 13, summary, score });
+    }
+    out
 }
 
 /// The player's worst moments: their deaths, scored on being a free death, the
 /// shutdown gold surrendered, and whether the enemy took an objective off it.
-fn lowlight_candidates(tl: &Timeline, pid: i32, pteam: i32, game: &Match) -> Vec<Candidate> {
+fn lowlight_candidates(tl: &Timeline, pid: i32, pteam: i32, game: &Match, ctx: &ScoreContext) -> Vec<Candidate> {
     let enemy = other_team(pteam as i64);
     let mut scored: Vec<(i64, Candidate)> = Vec::new();
     for death in tl.kills.iter().filter(|k| k.victim == pid) {
@@ -507,8 +623,12 @@ fn lowlight_candidates(tl: &Timeline, pid: i32, pteam: i32, game: &Match) -> Vec
         if repeated {
             score += 2;
         }
-        // A late throw costs more than an early one.
+        // A late throw costs more than an early one; a death in the closing
+        // window may have been the game.
         score += death.t / 600_000;
+        if death.t >= ctx.end_ms - CLOSING_WINDOW_MS {
+            score += 4;
+        }
 
         let opener = if executed {
             "executed".to_string()
@@ -698,6 +818,12 @@ struct Objective {
     t: i64,
     team: i32,
     monster: Monster,
+    /// The participant credited with the killing blow (the smite, for
+    /// monsters) — the anchor for objective-secure highlight candidates.
+    killer: i32,
+    /// Elder dragon (a `DRAGON` with the elder subtype) — worth Baron-tier
+    /// score, unlike an elemental drake.
+    elder: bool,
     label: String,
     /// killer + assists (participant ids) for the take.
     participants: Vec<i32>,
