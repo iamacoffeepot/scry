@@ -102,7 +102,7 @@ async fn run(cli: Cli) -> Result<()> {
             tracing::warn!(%match_id, "player not found in match participants; skipping");
             continue;
         };
-        webhook.post(&discord::stats_message(&match_summary, None, None, None), &[]).await?; // live posting doesn't track the message id
+        webhook.post(&discord::stats_message(&match_summary, None, None, None, None), &[]).await?; // live posting doesn't track the message id
         tracing::info!(%match_id, "posted summary");
     }
 
@@ -284,6 +284,20 @@ async fn post_from_archive(cli: &Cli, dir: &Path) -> Result<()> {
     let lowlight = embed_clip("lowlight")?;
     let (highlight, lowlight) = (highlight.as_deref(), lowlight.as_deref());
 
+    // An old game's replay dies at Riot's patch boundary — say so on the post
+    // instead of leaving the clips forever pending (backfills of a player's
+    // stale newest game hit this constantly).
+    let clip_note = if highlight.is_none() && lowlight.is_none() {
+        match (tick::game_patch(dir), tick::client_replay_patch().await) {
+            (Some(game), Some(client)) if game != client => {
+                Some("Replay expired (older patch) — no clips for this game")
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+
     // With an overview, stats + separator + overview are one CV2 container.
     // --no-overview renders a minimal header + stats + clips embed instead
     // (the summary is still parsed, for the clip captions).
@@ -293,12 +307,12 @@ async fn post_from_archive(cli: &Cli, dir: &Path) -> Result<()> {
         let summary = summary::parse(&md);
         let model = (!cli.summary_model.is_empty()).then_some(cli.summary_model.as_str());
         if cli.no_overview {
-            discord::clips_message(&match_summary, &summary, model, highlight, lowlight)
+            discord::clips_message(&match_summary, &summary, model, highlight, lowlight, clip_note)
         } else {
             discord::combined_message(&match_summary, &summary, model, chart, highlight, lowlight)
         }
     } else {
-        discord::stats_message(&match_summary, chart, highlight, lowlight)
+        discord::stats_message(&match_summary, chart, highlight, lowlight, clip_note)
     };
 
     let webhook = discord::Webhook::new(cli.webhook.clone());

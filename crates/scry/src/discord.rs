@@ -124,7 +124,13 @@ fn result_color(win: bool) -> u32 {
 }
 
 /// The stats-only message (live posting and the no-overview archive case).
-pub fn stats_message(s: &MatchSummary, chart: Option<&str>, highlight: Option<&str>, lowlight: Option<&str>) -> Value {
+pub fn stats_message(
+    s: &MatchSummary,
+    chart: Option<&str>,
+    highlight: Option<&str>,
+    lowlight: Option<&str>,
+    note: Option<&str>,
+) -> Value {
     let mut body = vec![header_section(s), text(stats_text(s))];
     if let Some(name) = chart {
         body.push(media(name));
@@ -136,8 +142,16 @@ pub fn stats_message(s: &MatchSummary, chart: Option<&str>, highlight: Option<&s
     if let Some(clip) = lowlight {
         clip_block(&mut body, "Lowlight", None, clip);
     }
+    push_note(&mut body, note);
     body.push(footer(None));
     container_message(s.win, body)
+}
+
+/// A small grey status line (e.g. "Replay expired — no clips for this game").
+fn push_note(body: &mut Vec<Value>, note: Option<&str>) {
+    if let Some(note) = note {
+        body.push(text(format!("-# {note}")));
+    }
 }
 
 /// A minimal message: header + stats + the captioned clips, with no overview
@@ -149,6 +163,7 @@ pub fn clips_message(
     model: Option<&str>,
     highlight: Option<&str>,
     lowlight: Option<&str>,
+    note: Option<&str>,
 ) -> Value {
     let mut body = vec![header_section(s), text(stats_text(s))];
     if let Some(clip) = highlight {
@@ -157,6 +172,7 @@ pub fn clips_message(
     if let Some(clip) = lowlight {
         clip_block(&mut body, "Lowlight", summary.section("Lowlight"), clip);
     }
+    push_note(&mut body, note);
     body.push(footer(model));
     container_message(s.win, body)
 }

@@ -372,14 +372,14 @@ async fn replay_ready(game_id: u64) -> bool {
 
 /// The client's replay patch as `major.minor` (`/lol-replays/v1/configuration`
 /// `gameVersion`), or `None` when the client is down/unreachable.
-async fn client_replay_patch() -> Option<String> {
+pub(crate) async fn client_replay_patch() -> Option<String> {
     let body = lcu_get("/lol-replays/v1/configuration").await?;
     let config: serde_json::Value = serde_json::from_str(&body).ok()?;
     major_minor(config.get("gameVersion")?.as_str()?)
 }
 
 /// A game's patch as `major.minor`, from its archived `match.json`.
-fn game_patch(dir: &Path) -> Option<String> {
+pub(crate) fn game_patch(dir: &Path) -> Option<String> {
     let raw = std::fs::read_to_string(dir.join("match.json")).ok()?;
     let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
     major_minor(value.pointer("/info/gameVersion")?.as_str()?)
