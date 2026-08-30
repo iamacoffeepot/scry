@@ -1,13 +1,16 @@
 //! `--tick`: one full poll pass in Rust, journal-driven — the port of
 //! poll.sh's `poll_all` + `clips_pass`. The shell keeps only the while/sleep.
 //!
-//! Per tracked account/queue: latest match id → skip if the journal says it
-//! was posted for that player → dump the archive → analyze → Opus overview
-//! (`claude -p` subprocess) → post (which appends `game_posted` +
-//! `rank_observed`). Then one serialized clip pass: newest pending job,
-//! client idle only, `scripts/highlight.sh`, edit the post to attach, one
-//! success per pass — the same contention rules the shell version learned
-//! the hard way.
+//! Per tracked account/queue: the last few match ids → for each the journal
+//! hasn't seen for that player (oldest first, so the channel reads
+//! chronologically): dump the archive → analyze (which also writes the
+//! deterministic clip pick + captions into `overview.md`) → post (which
+//! appends `game_posted` + `rank_observed`). Then the serialized clip pass:
+//! pending jobs newest-first, client idle only (re-checked per job),
+//! `scripts/highlight.sh`, edit the post to attach — bounded by
+//! `--clips-per-pass`, since recording is real-time. The contention rules the
+//! shell version learned the hard way still hold: one replay at a time, never
+//! during a live game.
 
 use std::path::{Path, PathBuf};
 
@@ -16,6 +19,10 @@ use anyhow::{Context, Result, anyhow, bail};
 use crate::cli::Cli;
 use crate::journal::{ClipAttempt, ClipsAbandoned, ClipsAttached, Journal};
 use crate::riot;
+
+/// Match ids fetched per (account, queue) each pass — how many games played
+/// between polls can still post (older ones age out of the window).
+const CATCHUP_IDS: i32 = 5;
 
 /// One parsed watch-list line: `riot_id|region|queue[,queue…]`.
 struct Account {
@@ -47,66 +54,49 @@ pub async fn run(cli: &Cli) -> Result<()> {
     Ok(())
 }
 
-/// Check one (account, queue) for a new latest game and run it through the
-/// dump → analyze → overview → post pipeline.
+/// Check one (account, queue) for newly-completed games and run each through
+/// the dump → analyze → post pipeline, oldest first.
 async fn process(cli: &Cli, journal: &Journal, account: &Account, queue: Option<u32>) -> Result<()> {
     let client = riot::Client::new(&cli.api_key, &account.region)?;
     let puuid =
         client.resolve_puuid(&account.riot_id).await.with_context(|| format!("resolving {}", account.riot_id))?;
 
     let queue_u16 = queue.map(|q| u16::try_from(q).unwrap_or(0));
-    let ids = client.recent_match_ids(&puuid, 1, queue_u16).await?;
-    let Some(match_id) = ids.first() else {
+    let ids = client.recent_match_ids(&puuid, CATCHUP_IDS, queue_u16).await?;
+    if ids.is_empty() {
         tracing::info!(riot_id = %account.riot_id, ?queue, "no recent game");
         return Ok(());
-    };
-    let (platform, game_id) = split_match_id(match_id)?;
-    if journal.fold()?.is_posted(platform, game_id, &account.riot_id) {
-        return Ok(());
     }
-    tracing::info!(riot_id = %account.riot_id, %match_id, "new game");
 
-    let match_json = client.raw_match_json(match_id).await?;
-    let timeline = client.raw_timeline_json(match_id).await?;
-    let dir = crate::archive::write(&cli.archive, match_id, &match_json, &timeline)?;
+    // Oldest unposted first, so a multi-game session posts chronologically.
+    let projection = journal.fold()?;
+    for match_id in ids.iter().rev() {
+        let (platform, game_id) = split_match_id(match_id)?;
+        if projection.is_posted(platform, game_id, &account.riot_id) {
+            continue;
+        }
+        tracing::info!(riot_id = %account.riot_id, %match_id, "new game");
 
-    crate::analyze_archive(&account.riot_id, &dir)?;
-    write_overview(&account.riot_id, &dir).await?;
+        let match_json = client.raw_match_json(match_id).await?;
+        let timeline = client.raw_timeline_json(match_id).await?;
+        let dir = crate::archive::write(&cli.archive, match_id, &match_json, &timeline)?;
 
-    // The post path appends `game_posted` (+ `rank_observed`) to the journal.
-    crate::post_from_archive(&post_cli(cli, &account.riot_id, &dir, /* edit */ false), &dir).await?;
-    tracing::info!(riot_id = %account.riot_id, %match_id, "posted");
+        // analyze writes moments.md, clips.json, and the deterministic
+        // overview.md (clip picks + captions).
+        crate::analyze_archive(&account.riot_id, &dir)?;
+
+        // The post path appends `game_posted` (+ `rank_observed`).
+        crate::post_from_archive(&post_cli(cli, &account.riot_id, &dir, /* edit */ false), &dir).await?;
+        tracing::info!(riot_id = %account.riot_id, %match_id, "posted");
+    }
     Ok(())
 }
 
-/// Produce `<dir>/overview.md` with the OVERVIEW prompt over the grounded
-/// moments, via the `claude` CLI.
-async fn write_overview(riot_id: &str, dir: &Path) -> Result<()> {
-    let system_prompt = std::fs::read_to_string("prompts/OVERVIEW.md").context("reading prompts/OVERVIEW.md")?;
-    let output = tokio::process::Command::new("claude")
-        .arg("-p")
-        .args(["--model", "opus"])
-        .arg("--add-dir")
-        .arg(dir)
-        .args(["--allowedTools", "Read Grep Glob"])
-        .args(["--system-prompt", &system_prompt])
-        .arg(format!(
-            "Write the post-game overview centered on {riot_id}. Start from moments.md in the provided directory."
-        ))
-        .output()
-        .await
-        .context("running claude for the overview")?;
-    if !output.status.success() {
-        bail!("claude overview exited {}: {}", output.status, String::from_utf8_lossy(&output.stderr));
-    }
-    std::fs::write(dir.join("overview.md"), &output.stdout)
-        .with_context(|| format!("writing {}", dir.join("overview.md").display()))?;
-    Ok(())
-}
-
-/// Record and attach clips for at most one pending game — serialized,
-/// idle-only, retry-capped (the replay client is a contended singleton).
+/// Record and attach clips for pending games, newest first — serialized,
+/// idle-only, retry-capped (the replay client is a contended singleton), and
+/// bounded by `--clips-per-pass` since each recording runs in real time.
 async fn clips_pass(cli: &Cli, journal: &Journal) -> Result<()> {
+    let mut recorded = 0;
     let projection = journal.fold()?;
     for (platform, game_id, job) in projection.pending_clips() {
         let dir = cli.archive.join(&platform).join(game_id.to_string());
@@ -143,7 +133,10 @@ async fn clips_pass(cli: &Cli, journal: &Journal) -> Result<()> {
         // The edit path appends `clips_attached` on success.
         crate::post_from_archive(&post_cli(cli, &job.riot_id, &dir, /* edit */ true), &dir).await?;
         tracing::info!(%platform, game_id, "clips attached");
-        return Ok(()); // One success per pass keeps polling snappy.
+        recorded += 1;
+        if recorded >= cli.clips_per_pass {
+            return Ok(()); // Bound the pass; the next tick continues the queue.
+        }
     }
     Ok(())
 }
@@ -197,6 +190,7 @@ fn post_cli(cli: &Cli, riot_id: &str, dir: &Path, edit: bool) -> Cli {
         journal: cli.journal.clone(),
         no_clips: cli.no_clips,
         clip_max_tries: cli.clip_max_tries,
+        clips_per_pass: cli.clips_per_pass,
     }
 }
 

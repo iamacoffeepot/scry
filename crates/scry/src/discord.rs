@@ -140,12 +140,13 @@ pub fn stats_message(s: &MatchSummary, chart: Option<&str>, highlight: Option<&s
     container_message(s.win, body)
 }
 
-/// A minimal message: header + stats + the captioned clips, with no AI-overview
-/// prose and no chart. `summary` is used only for the clip captions.
+/// A minimal message: header + stats + the captioned clips, with no overview
+/// prose and no chart. `summary` is used only for the clip captions; `model`
+/// is the optional footer attribution (None when nothing generated prose).
 pub fn clips_message(
     s: &MatchSummary,
     summary: &Summary,
-    model: &str,
+    model: Option<&str>,
     highlight: Option<&str>,
     lowlight: Option<&str>,
 ) -> Value {
@@ -156,16 +157,16 @@ pub fn clips_message(
     if let Some(clip) = lowlight {
         clip_block(&mut body, "Lowlight", summary.section("Lowlight"), clip);
     }
-    body.push(footer(Some(model)));
+    body.push(footer(model));
     container_message(s.win, body)
 }
 
-/// The full package: stats, a real Separator, the AI overview, and the chart —
-/// all in one Components-V2 container (the accent bar keys off the result).
+/// The full package: stats, a real Separator, the overview prose, and the
+/// chart — one Components-V2 container (the accent bar keys off the result).
 pub fn combined_message(
     s: &MatchSummary,
     summary: &Summary,
-    model: &str,
+    model: Option<&str>,
     chart: Option<&str>,
     highlight: Option<&str>,
     lowlight: Option<&str>,
@@ -188,7 +189,7 @@ pub fn combined_message(
     if let Some(clip) = lowlight {
         clip_block(&mut body, "Lowlight", summary.section("Lowlight"), clip);
     }
-    body.push(footer(Some(model)));
+    body.push(footer(model));
     container_message(s.win, body)
 }
 

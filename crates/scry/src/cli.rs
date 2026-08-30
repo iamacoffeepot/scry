@@ -45,8 +45,9 @@ pub struct Cli {
     #[arg(long)]
     pub summary: Option<PathBuf>,
 
-    /// Model label shown in the coach summary's footer (attribution).
-    #[arg(long, env = "SCRY_SUMMARY_MODEL", default_value = "Claude Opus")]
+    /// Footer attribution label for generated prose; empty (the default) means
+    /// no attribution — the pipeline is deterministic.
+    #[arg(long, env = "SCRY_SUMMARY_MODEL", default_value = "")]
     pub summary_model: String,
 
     /// Post a packaged stats + coach embed from a dumped match directory
@@ -117,6 +118,11 @@ pub struct Cli {
     /// Clip attempts per game before the job is abandoned.
     #[arg(long, env = "CLIP_MAX_TRIES", default_value_t = 15)]
     pub clip_max_tries: u32,
+
+    /// Clip recordings per pass; the pass also ends when the client leaves
+    /// idle. Recording is serial and real-time, so this bounds a pass's length.
+    #[arg(long, env = "SCRY_CLIPS_PER_PASS", default_value_t = 5)]
+    pub clips_per_pass: u32,
 }
 
 impl Cli {

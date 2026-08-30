@@ -152,6 +152,12 @@ fn analyze_archive(riot_id: &str, dir: &Path) -> Result<()> {
     fs::write(dir.join("clips.json"), clips)
         .with_context(|| format!("writing {}", dir.join("clips.json").display()))?;
 
+    // The deterministic clip pick: best-scored highlight + lowlight become the
+    // `## Highlight` / `## Lowlight` sections highlight.sh reads timestamps
+    // from and the post uses as clip captions.
+    fs::write(dir.join("overview.md"), analysis::render_overview_md(&highlights, &lowlights))
+        .with_context(|| format!("writing {}", dir.join("overview.md").display()))?;
+
     println!("\n{} moments -> {}", moments.len(), out.display());
     Ok(())
 }
@@ -268,10 +274,11 @@ async fn post_from_archive(cli: &Cli, dir: &Path) -> Result<()> {
         let md =
             fs::read_to_string(summary_path).with_context(|| format!("reading summary {}", summary_path.display()))?;
         let summary = summary::parse(&md);
+        let model = (!cli.summary_model.is_empty()).then_some(cli.summary_model.as_str());
         if cli.no_overview {
-            discord::clips_message(&match_summary, &summary, &cli.summary_model, highlight, lowlight)
+            discord::clips_message(&match_summary, &summary, model, highlight, lowlight)
         } else {
-            discord::combined_message(&match_summary, &summary, &cli.summary_model, chart, highlight, lowlight)
+            discord::combined_message(&match_summary, &summary, model, chart, highlight, lowlight)
         }
     } else {
         discord::stats_message(&match_summary, chart, highlight, lowlight)

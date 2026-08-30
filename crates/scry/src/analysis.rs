@@ -200,9 +200,9 @@ pub fn render_moments_md(
     }
 
     // Clip anchors: the OVERVIEW prompt picks one of each and echoes its m:ss.
-    out.push_str("\n## Highlight candidates (choose ONE for the Highlight clip; echo its m:ss)\n");
+    out.push_str("\n## Highlight candidates (ranked; the pick takes the best-scored)\n");
     render_candidates(&mut out, highlights);
-    out.push_str("\n## Lowlight candidates (choose ONE for the Lowlight clip; echo its m:ss)\n");
+    out.push_str("\n## Lowlight candidates (ranked; the pick takes the best-scored)\n");
     render_candidates(&mut out, lowlights);
 
     out
@@ -359,6 +359,8 @@ const PUNISH_WINDOW_MS: i64 = 30_000;
 /// After a fight ends, the player must survive this long for it to read as a
 /// clean "walked away" highlight.
 const SURVIVE_AFTER_MS: i64 = 8_000;
+/// A death this soon after the previous one reads as compounding the throw.
+const REPEAT_DEATH_MS: i64 = 60_000;
 
 /// Compute the ranked Highlight and Lowlight clip candidates for the centered
 /// player, each an exact-timestamp anchor the OVERVIEW prompt picks from.
@@ -414,6 +416,17 @@ fn highlight_candidates(tl: &Timeline, pid: i32, pteam: i32) -> Vec<Candidate> {
         if objective.is_some() {
             score += 3;
         }
+        // Solo kills read better on video than shared cleanup.
+        let solo_kills = pkills.iter().filter(|k| k.assists.is_empty()).count() as i64;
+        score += solo_kills * 3;
+        // Outnumbered fights are the outplays worth watching; headcount from
+        // the fight's own kill events is the grounded proxy for the odds.
+        let (allies, enemies) = fight_headcount(fight, pteam);
+        if enemies > allies {
+            score += ((enemies - allies) * 4).min(8);
+        }
+        // A fight at 30 minutes decides more than the same fight at 8.
+        score += start / 600_000;
         if score <= 0 {
             continue;
         }
@@ -441,13 +454,23 @@ fn highlight_candidates(tl: &Timeline, pid: i32, pteam: i32) -> Vec<Candidate> {
             ""
         };
         let obj_s = objective.map(|o| format!("; {} followed", o.label)).unwrap_or_default();
+        let solo_s = match solo_kills {
+            0 => String::new(),
+            1 => ", incl. a solo kill".to_string(),
+            n => format!(", incl. {n} solo kills"),
+        };
+        let odds_s = if enemies > allies {
+            format!(", outnumbered {allies}v{enemies}")
+        } else {
+            String::new()
+        };
         let summary = format!(
-            "you went {}/{}/{} in a fight{multi_s}{surv_s}{obj_s} (+{gold}g)",
+            "you went {}/{}/{} in a fight{multi_s}{solo_s}{odds_s}{surv_s}{obj_s} (+{gold}g)",
             pkills.len(),
             pdeaths,
             passists,
         );
-        scored.push((score, Candidate { t_ms: anchor, seek_s, dur_s, summary }));
+        scored.push((score, Candidate { t_ms: anchor, seek_s, dur_s, summary, score }));
     }
     top_candidates(scored)
 }
@@ -474,12 +497,33 @@ fn lowlight_candidates(tl: &Timeline, pid: i32, pteam: i32, game: &Match) -> Vec
         if punished.is_some() {
             score += 4;
         }
+        // An execute (no killer credit) is the free-est death there is.
+        let executed = death.killer <= 0;
+        if executed {
+            score += 3;
+        }
+        // Dying again within a minute of the last death compounds the throw.
+        let repeated = tl.kills.iter().any(|k| k.victim == pid && k.t < death.t && death.t - k.t <= REPEAT_DEATH_MS);
+        if repeated {
+            score += 2;
+        }
+        // A late throw costs more than an early one.
+        score += death.t / 600_000;
 
-        let killer = champ_of(game, death.killer);
+        let opener = if executed {
+            "executed".to_string()
+        } else {
+            format!("caught by {}", champ_of(game, death.killer))
+        };
         let free_s = if traded {
             ""
         } else {
             " (free death)"
+        };
+        let rep_s = if repeated {
+            ", back-to-back"
+        } else {
+            ""
         };
         let gold_s = if death.shutdown > 0 {
             format!(", gave up a {}g shutdown", death.shutdown)
@@ -487,18 +531,32 @@ fn lowlight_candidates(tl: &Timeline, pid: i32, pteam: i32, game: &Match) -> Vec
             String::new()
         };
         let obj_s = punished.map(|o| format!("; {} followed", o.label)).unwrap_or_default();
-        let summary = format!("caught by {killer}{free_s}{gold_s}{obj_s}");
+        let summary = format!("{opener}{free_s}{rep_s}{gold_s}{obj_s}");
         // A death is a single instant: lead-in, the death, a short tail.
         let seek_s = (death.t / 1000 - CLIP_LEAD_S).max(0);
         let dur_s = CLIP_LEAD_S + 9;
-        scored.push((score, Candidate { t_ms: death.t, seek_s, dur_s, summary }));
+        scored.push((score, Candidate { t_ms: death.t, seek_s, dur_s, summary, score }));
     }
     top_candidates(scored)
 }
 
-/// Render the clip windows as JSON keyed by the same `m:ss` the OVERVIEW prompt
-/// echoes, so `highlight.sh` can look up the exact seek + duration for the
-/// timestamp it was handed: `{"22:06": {"seek": 1319, "dur": 32}, ...}`.
+/// Render the deterministic overview: the best-scored highlight and lowlight,
+/// each as a `## <section>` holding `**m:ss** — summary` — the timestamp
+/// `highlight.sh` reads and the caption the post renders. A side with no
+/// candidates gets no section (that clip is skipped).
+pub fn render_overview_md(highlights: &[Candidate], lowlights: &[Candidate]) -> String {
+    let mut out = String::new();
+    for (heading, candidates) in [("Highlight", highlights), ("Lowlight", lowlights)] {
+        if let Some(best) = candidates.iter().max_by_key(|c| c.score) {
+            out.push_str(&format!("## {heading}\n**{}** — {}\n\n", mmss(best.t_ms), best.summary));
+        }
+    }
+    out
+}
+
+/// Render the clip windows as JSON keyed by `m:ss`, so `highlight.sh` can look
+/// up the exact seek + duration for the timestamp it was handed:
+/// `{"22:06": {"seek": 1319, "dur": 32}, ...}`.
 pub fn render_clips_json(highlights: &[Candidate], lowlights: &[Candidate]) -> String {
     let mut map = serde_json::Map::new();
     for c in highlights.iter().chain(lowlights) {
@@ -514,6 +572,30 @@ fn top_candidates(mut scored: Vec<(i64, Candidate)>) -> Vec<Candidate> {
     scored.truncate(MAX_CANDIDATES);
     scored.sort_by_key(|(_, c)| c.t_ms);
     scored.into_iter().map(|(_, c)| c).collect()
+}
+
+/// Distinct participants of each side appearing in a fight's kill events
+/// (killer, victim, or assist) — the grounded proxy for the fight's odds; the
+/// timeline carries no positions for champions who dealt no kill-relevant
+/// action, so uninvolved bystanders don't count.
+fn fight_headcount(fight: &[KillEv], pteam: i32) -> (i64, i64) {
+    let mut allies = std::collections::HashSet::new();
+    let mut enemies = std::collections::HashSet::new();
+    for k in fight {
+        let (killer_side, victim_side) = if k.killer_team == pteam {
+            (&mut allies, &mut enemies)
+        } else {
+            (&mut enemies, &mut allies)
+        };
+        if k.killer > 0 {
+            killer_side.insert(k.killer);
+        }
+        killer_side.extend(k.assists.iter().copied());
+        if k.victim > 0 {
+            victim_side.insert(k.victim);
+        }
+    }
+    (allies.len() as i64, enemies.len() as i64)
 }
 
 /// Group the player's kills the same way fights cluster (by the shared time gap),
@@ -568,9 +650,11 @@ struct Special {
     len: i64,
 }
 
-/// A candidate clip moment: an exact game-time anchor plus a grounded one-liner
-/// the OVERVIEW prompt chooses from (and echoes the timestamp of) for a clip.
-/// `seek_s`/`dur_s` describe the video window to record so the whole play fits.
+/// A candidate clip moment: an exact game-time anchor plus a grounded
+/// one-liner. The deterministic pick ([`render_overview_md`]) takes the
+/// best-scored candidate of each list; the ranked lists land in `moments.md`
+/// as a record. `seek_s`/`dur_s` describe the video window to record so the
+/// whole play fits.
 #[derive(Debug, Clone)]
 pub struct Candidate {
     pub t_ms: i64,
@@ -579,6 +663,8 @@ pub struct Candidate {
     /// Clip length in seconds — sized to the fight span, capped.
     pub dur_s: i64,
     pub summary: String,
+    /// The grounded score the pick maximizes.
+    pub score: i64,
 }
 
 /// Seconds of lead-in before the play and tail after it, and the hard cap on a
@@ -838,6 +924,25 @@ mod tests {
 
     /// The headline: Red side (Moon's team) won multiple early fights but
     /// squandered them, while Blue side converted its fights.
+    #[test]
+    fn overview_picks_best_scored_not_first() {
+        let candidate = |t_ms: i64, score: i64, summary: &str| Candidate {
+            t_ms,
+            seek_s: 0,
+            dur_s: 10,
+            summary: summary.to_string(),
+            score,
+        };
+        // Candidates arrive in chronological order; the pick must follow
+        // score, not position.
+        let md =
+            render_overview_md(&[candidate(60_000, 3, "small skirmish"), candidate(125_000, 9, "the outplay")], &[]);
+        assert!(md.contains("**2:05** — the outplay"), "picked by score: {md}");
+        assert!(!md.contains("small skirmish"));
+        assert!(md.starts_with("## Highlight"));
+        assert!(!md.contains("## Lowlight"), "no lowlight candidates, no section");
+    }
+
     #[test]
     fn conversion_gap_is_the_story() {
         let Some((game, events)) = fixture() else {
