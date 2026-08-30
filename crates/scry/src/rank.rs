@@ -3,15 +3,17 @@
 //! against the previous snapshot. Deltas are attributed per game as long as we
 //! catalog games in chronological order (one ranked game per poll interval).
 
-use riven::consts::{Division, Queue, QueueType, Tier};
+use riven::consts::Queue;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-/// Current ranked standing in one queue.
+/// Current ranked standing in one queue. Tier and division stay the raw
+/// league-v4 strings ("GOLD", "II") so a tier this build has never heard of
+/// still displays and diffs; only the ladder ordering needs the known table.
 #[derive(Debug, Clone)]
 pub struct Rank {
-    pub tier: Tier,
-    pub division: Division,
+    pub tier: String,
+    pub division: String,
     pub lp: i32,
 }
 
@@ -22,14 +24,14 @@ impl Rank {
     /// A monotonic ladder position so a delta survives promotions/demotions
     /// (e.g. Gold II 98 -> Gold I 20 reads as +22, not -78).
     pub fn ladder_value(&self) -> i32 {
-        let idx = tier_index(self.tier);
+        let idx = tier_index(&self.tier);
         if idx >= APEX {
             APEX * 400 + self.lp
         } else {
-            let div = match self.division {
-                Division::IV => 0,
-                Division::III => 1,
-                Division::II => 2,
+            let div = match self.division.as_str() {
+                "IV" => 0,
+                "III" => 1,
+                "II" => 2,
                 _ => 3, // I (or legacy V) — top of the tier.
             };
             idx * 400 + div * 100 + self.lp
@@ -38,8 +40,8 @@ impl Rank {
 
     /// Display like "Gold II", or just "Master" for apex tiers.
     pub fn label(&self) -> String {
-        let tier = titlecase(self.tier.as_ref());
-        if tier_index(self.tier) >= APEX {
+        let tier = titlecase(&self.tier);
+        if tier_index(&self.tier) >= APEX {
             tier
         } else {
             format!("{tier} {}", self.division)
@@ -47,17 +49,23 @@ impl Rank {
     }
 }
 
-fn tier_index(t: Tier) -> i32 {
-    match t {
-        Tier::IRON => 0,
-        Tier::BRONZE => 1,
-        Tier::SILVER => 2,
-        Tier::GOLD => 3,
-        Tier::PLATINUM => 4,
-        Tier::EMERALD => 5,
-        Tier::DIAMOND => 6,
-        Tier::MASTER | Tier::GRANDMASTER | Tier::CHALLENGER => APEX,
-        _ => 0,
+/// Ladder ordering for the known tiers. An unknown (newly added) tier sorts
+/// below Iron with a warn — its label and LP still render; only cross-tier
+/// deltas around it are approximate until this table learns it.
+fn tier_index(t: &str) -> i32 {
+    match t.to_ascii_uppercase().as_str() {
+        "IRON" => 0,
+        "BRONZE" => 1,
+        "SILVER" => 2,
+        "GOLD" => 3,
+        "PLATINUM" => 4,
+        "EMERALD" => 5,
+        "DIAMOND" => 6,
+        "MASTER" | "GRANDMASTER" | "CHALLENGER" => APEX,
+        other => {
+            tracing::warn!(tier = other, "unknown ranked tier; ladder ordering approximate");
+            -1
+        }
     }
 }
 
@@ -69,11 +77,11 @@ fn titlecase(s: &str) -> String {
     }
 }
 
-/// The ranked queue type for a match queue, if it is ranked.
-pub fn queue_type(queue: Queue) -> Option<QueueType> {
+/// The league-v4 `queueType` string for a match queue, if it is ranked.
+pub fn queue_type(queue: Queue) -> Option<&'static str> {
     match queue.0 {
-        420 => Some(QueueType::RANKED_SOLO_5x5),
-        440 => Some(QueueType::RANKED_FLEX_SR),
+        420 => Some("RANKED_SOLO_5x5"),
+        440 => Some("RANKED_FLEX_SR"),
         _ => None,
     }
 }

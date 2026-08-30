@@ -124,6 +124,9 @@ pub struct Projection {
     message_ids: HashMap<(String, u64), String>,
     /// Clip job state per posted game.
     clips: HashMap<(String, u64), ClipJob>,
+    /// Newest posted game id per (riot_id lowercase, queue_id) — the floor
+    /// below which older window entries are history, not news.
+    newest: HashMap<(String, u32), u64>,
     /// Last observed ladder value per (puuid, queue_id).
     ranks: HashMap<(String, u32), i32>,
 }
@@ -131,6 +134,8 @@ pub struct Projection {
 impl Projection {
     fn apply_posted(&mut self, event: GamePosted) {
         let key = (event.platform.clone(), event.game_id);
+        let floor = self.newest.entry((event.riot_id.to_lowercase(), event.queue_id)).or_insert(0);
+        *floor = (*floor).max(event.game_id);
         self.posted.insert((event.platform, key.1, event.riot_id.to_lowercase()));
         if !event.message_id.is_empty() {
             self.message_ids.insert(key.clone(), event.message_id);
@@ -179,6 +184,17 @@ impl Projection {
             .collect();
         jobs.sort_by_key(|(_, game_id, _)| std::cmp::Reverse(*game_id));
         jobs
+    }
+
+    /// The newest game id already posted for this player — in one queue, or
+    /// across all queues when `queue_id` is `None` (an `all` watch line).
+    pub fn newest_posted(&self, riot_id: &str, queue_id: Option<u32>) -> Option<u64> {
+        let rid = riot_id.to_lowercase();
+        self.newest
+            .iter()
+            .filter(|((r, q), _)| *r == rid && queue_id.is_none_or(|want| *q == want))
+            .map(|(_, id)| *id)
+            .max()
     }
 
     /// The previous ladder value for (puuid, queue), the LP-delta baseline.
@@ -233,6 +249,10 @@ mod tests {
         assert_eq!(pending.len(), 1, "game 100 finished; only 101 pending");
         assert_eq!((pending[0].0.as_str(), pending[0].1), ("NA1", 101));
         assert_eq!(projection.previous_ladder("p-1", 420), Some(1355));
+        // The floor: newest posted per player/queue, any-queue when None.
+        assert_eq!(projection.newest_posted("MOON#132", Some(420)), Some(100));
+        assert_eq!(projection.newest_posted("moon#132", Some(440)), None);
+        assert_eq!(projection.newest_posted("himles#9267", None), Some(101));
 
         std::fs::remove_dir_all(&dir).ok();
     }

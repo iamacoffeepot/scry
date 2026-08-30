@@ -41,7 +41,16 @@ impl Client {
     }
 
     async fn raw_get(&self, path: &str) -> Result<Value> {
-        let url = format!("https://{}.api.riotgames.com{path}", self.regional_host());
+        self.raw_get_host(self.regional_host(), path).await
+    }
+
+    /// league-v4 routes by platform (na1, euw1, …), not by regional cluster.
+    fn platform_host(&self) -> String {
+        format!("{:?}", self.platform).to_lowercase()
+    }
+
+    async fn raw_get_host(&self, host: &str, path: &str) -> Result<Value> {
+        let url = format!("https://{host}.api.riotgames.com{path}");
         let resp = self
             .http
             .get(&url)
@@ -101,20 +110,25 @@ impl Client {
         Ok(account.puuid)
     }
 
-    /// Most-recent match IDs for a PUUID, newest first.
-    /// The player's current standing in `queue`, or `None` if unranked there.
-    pub async fn rank(&self, puuid: &str, queue: riven::consts::QueueType) -> Result<Option<crate::rank::Rank>> {
+    /// The player's current standing in `queue_type` (league-v4), or `None`
+    /// if unranked there. Parsed leniently from the raw JSON rather than
+    /// riven's typed model: a ranked tier Riot adds (the 2026 `SALT` tier
+    /// broke the enum) must degrade the ladder ordering, never the LP line.
+    pub async fn rank(&self, puuid: &str, queue_type: &str) -> Result<Option<crate::rank::Rank>> {
         let entries = self
-            .api
-            .league_v4()
-            .get_league_entries_by_puuid(self.platform, puuid)
+            .raw_get_host(&self.platform_host(), &format!("/lol/league/v4/entries/by-puuid/{puuid}"))
             .await
             .context("league-v4 entries request failed")?;
-        Ok(entries.into_iter().find(|e| e.queue_type == queue).map(|e| crate::rank::Rank {
-            tier: e.tier.unwrap_or(riven::consts::Tier::UNRANKED),
-            division: e.rank.unwrap_or(riven::consts::Division::I),
-            lp: e.league_points,
-        }))
+        Ok(entries
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|e| e.get("queueType").and_then(Value::as_str) == Some(queue_type))
+            .map(|e| crate::rank::Rank {
+                tier: e.get("tier").and_then(Value::as_str).unwrap_or("UNRANKED").to_string(),
+                division: e.get("rank").and_then(Value::as_str).unwrap_or("I").to_string(),
+                lp: e.get("leaguePoints").and_then(Value::as_i64).unwrap_or(0) as i32,
+            }))
     }
 
     pub async fn recent_match_ids(&self, puuid: &str, count: i32, queue: Option<u16>) -> Result<Vec<String>> {

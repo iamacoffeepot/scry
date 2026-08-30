@@ -69,10 +69,19 @@ async fn process(cli: &Cli, journal: &Journal, account: &Account, queue: Option<
     }
 
     // Oldest unposted first, so a multi-game session posts chronologically.
+    // The floor keeps the window from dumping history: only games newer than
+    // the newest already-posted game are news; a player/queue with no posted
+    // history backfills the single newest game, never the whole window.
     let projection = journal.fold()?;
+    let floor = projection.newest_posted(&account.riot_id, queue);
+    let newest_in_window = ids.first().map(|id| split_match_id(id)).transpose()?.map(|(_, game_id)| game_id);
     for match_id in ids.iter().rev() {
         let (platform, game_id) = split_match_id(match_id)?;
         if projection.is_posted(platform, game_id, &account.riot_id) {
+            continue;
+        }
+        let is_newest = Some(game_id) == newest_in_window;
+        if !is_newest && !floor.is_some_and(|f| game_id > f) {
             continue;
         }
         tracing::info!(riot_id = %account.riot_id, %match_id, "new game");
