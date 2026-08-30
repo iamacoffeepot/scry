@@ -57,7 +57,7 @@ async fn run(cli: Cli) -> Result<()> {
 
     // Run the causal analysis over a dumped match and print the moments.
     if let Some(dir) = cli.analyze.as_deref() {
-        return analyze_archive(cli.require_riot_id()?, dir);
+        return analyze_archive(cli.require_riot_id()?, dir, &tick::roster_riot_ids(&cli));
     }
 
     let region = cli.region.as_deref().context("--region is required (except with --from-archive)")?;
@@ -111,7 +111,7 @@ async fn run(cli: Cli) -> Result<()> {
 
 /// Run the causal analysis over a dumped match directory and print the
 /// classified moments. Uses only the archived files — no Riot API.
-fn analyze_archive(riot_id: &str, dir: &Path) -> Result<()> {
+fn analyze_archive(riot_id: &str, dir: &Path, roster: &[String]) -> Result<()> {
     let raw = fs::read_to_string(dir.join("match.json"))
         .with_context(|| format!("reading {}", dir.join("match.json").display()))?;
     let game: Match = serde_json::from_str(&raw).context("parsing match.json into match-v5")?;
@@ -165,15 +165,45 @@ fn analyze_archive(riot_id: &str, dir: &Path) -> Result<()> {
     fs::write(dir.join(format!("clips{suffix}.json")), clips)
         .with_context(|| format!("writing clips{suffix}.json in {}", dir.display()))?;
 
-    // The deterministic clip pick: best-scored highlight + lowlight become the
-    // `## Highlight` / `## Lowlight` sections highlight.sh reads timestamps
-    // from and the post uses as clip captions — all per player, since picks
-    // differ per tracked perspective in a shared game.
-    fs::write(dir.join(format!("overview{suffix}.md")), analysis::render_overview_md(&highlights, &lowlights))
-        .with_context(|| format!("writing overview{suffix}.md in {}", dir.display()))?;
+    // The deterministic clip pick, assigned jointly across every tracked
+    // player in this game so a shared teamfight doesn't become N
+    // near-identical clips: the strongest claim takes its moment, others
+    // divert to their best free alternative when it's worth taking.
+    let mut tracked = tracked_puuids(&game, roster);
+    if !tracked.contains(&puuid) {
+        tracked.push(puuid.clone());
+    }
+    let picks = analysis::assign_picks(&game, &events, &tracked);
+    let (highlight, lowlight) =
+        picks.into_iter().find(|(p, _, _)| *p == puuid).map(|(_, h, l)| (h, l)).unwrap_or((None, None));
+    fs::write(
+        dir.join(format!("overview{suffix}.md")),
+        analysis::render_picks_md(highlight.as_ref(), lowlight.as_ref()),
+    )
+    .with_context(|| format!("writing overview{suffix}.md in {}", dir.display()))?;
 
     println!("\n{} moments -> {}", moments.len(), out.display());
     Ok(())
+}
+
+/// The PUUIDs of every watch-list player appearing in this game (Riot IDs
+/// compare case-insensitively; the match data stores name and tag at game
+/// time).
+fn tracked_puuids(game: &Match, roster: &[String]) -> Vec<String> {
+    roster
+        .iter()
+        .filter_map(|riot_id| {
+            let (name, tag) = riot_id.split_once('#')?;
+            game.info
+                .participants
+                .iter()
+                .find(|p| {
+                    p.riot_id_game_name.as_deref().is_some_and(|n| n.eq_ignore_ascii_case(name))
+                        && p.riot_id_tagline.as_deref().is_some_and(|t| t.eq_ignore_ascii_case(tag))
+                })
+                .map(|p| p.puuid.clone())
+        })
+        .collect()
 }
 
 /// Build and post the stats + coach package from a dumped match directory,

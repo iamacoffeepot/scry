@@ -199,7 +199,7 @@ fn rewrite_watch_list(path: &Path, old: &str, new: &str) -> Result<()> {
 async fn post_one(cli: &Cli, post: &PendingPost) -> Result<()> {
     // analyze writes the per-player moments/clips/overview artifacts (clip
     // picks + captions differ per tracked perspective).
-    crate::analyze_archive(&post.riot_id, &post.dir)?;
+    crate::analyze_archive(&post.riot_id, &post.dir, &roster_riot_ids(cli))?;
     // The post path appends `game_posted` (+ `rank_observed`).
     let overview = post.dir.join(format!("overview-{}.md", slug(&post.riot_id)));
     crate::post_from_archive(&post_cli(cli, &post.riot_id, &overview, &post.dir, /* edit */ false), &post.dir).await?;
@@ -313,7 +313,7 @@ async fn try_game_clips(
             })?;
             let suffix = format!("-{}", slug(&job.riot_id));
             if !dir.join(format!("overview{suffix}.md")).exists() {
-                let _ = crate::analyze_archive(&job.riot_id, &dir);
+                let _ = crate::analyze_archive(&job.riot_id, &dir, &roster_riot_ids(cli));
             }
             let overview = dir.join(format!("overview{suffix}.md"));
             if overview.exists()
@@ -351,7 +351,7 @@ async fn try_game_clips(
         }
         let suffix = format!("-{}", slug(&job.riot_id));
         if !dir.join(format!("overview{suffix}.md")).exists()
-            && let Err(error) = crate::analyze_archive(&job.riot_id, &dir)
+            && let Err(error) = crate::analyze_archive(&job.riot_id, &dir, &roster_riot_ids(cli))
         {
             tracing::warn!(%platform, game_id, riot_id = %job.riot_id, error = %format!("{error:#}"), "perspective analysis failed; abandoning clips");
             journal.append(&ClipsAbandoned {
@@ -729,6 +729,15 @@ fn read_queue_id(dir: &Path) -> Option<u32> {
     let raw = std::fs::read_to_string(dir.join("match.json")).ok()?;
     let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
     u32::try_from(value.get("info")?.get("queueId")?.as_u64()?).ok()
+}
+
+/// The watch list's riot ids, for joint clip-pick assignment across tracked
+/// players sharing a game; a missing or unreadable list degrades to solo
+/// assignment.
+pub(crate) fn roster_riot_ids(cli: &Cli) -> Vec<String> {
+    parse_accounts(&cli.accounts, None)
+        .map(|accounts| accounts.into_iter().map(|account| account.riot_id).collect())
+        .unwrap_or_default()
 }
 
 /// A riot id as a filename-safe slug: every non-alphanumeric byte becomes

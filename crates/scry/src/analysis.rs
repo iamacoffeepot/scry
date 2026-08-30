@@ -660,18 +660,97 @@ fn lowlight_candidates(tl: &Timeline, pid: i32, pteam: i32, game: &Match, ctx: &
     top_candidates(scored)
 }
 
-/// Render the deterministic overview: the best-scored highlight and lowlight,
-/// each as a `## <section>` holding `**m:ss** — summary` — the timestamp
-/// `highlight.sh` reads and the caption the post renders. A side with no
-/// candidates gets no section (that clip is skipped).
-pub fn render_overview_md(highlights: &[Candidate], lowlights: &[Candidate]) -> String {
+/// Render one player's assigned picks: each as a `## <section>` holding
+/// `**m:ss** — summary` — the timestamp `highlight.sh` reads and the caption
+/// the post renders. A side with no pick gets no section (skipped clip).
+pub fn render_picks_md(highlight: Option<&Candidate>, lowlight: Option<&Candidate>) -> String {
     let mut out = String::new();
-    for (heading, candidates) in [("Highlight", highlights), ("Lowlight", lowlights)] {
-        if let Some(best) = candidates.iter().max_by_key(|c| c.score) {
+    for (heading, pick) in [("Highlight", highlight), ("Lowlight", lowlight)] {
+        if let Some(best) = pick {
             out.push_str(&format!("## {heading}\n**{}** — {}\n\n", mmss(best.t_ms), best.summary));
         }
     }
     out
+}
+
+/// Jointly assign every tracked player in the game their Highlight and
+/// Lowlight picks, spreading picks across distinct moments: a shared
+/// teamfight is often several players' best-scored candidate, and N
+/// near-identical clips of it teach the channel nothing. Pure in its inputs
+/// (players keyed and ordered by PUUID), so whichever player's analyze runs
+/// first computes the same assignment.
+pub fn assign_picks(
+    game: &Match,
+    events_jsonl: &str,
+    tracked_puuids: &[String],
+) -> Vec<(String, Option<Candidate>, Option<Candidate>)> {
+    let mut puuids: Vec<&String> = tracked_puuids.iter().collect();
+    puuids.sort();
+    puuids.dedup();
+    let per_player: Vec<(String, Vec<Candidate>, Vec<Candidate>)> = puuids
+        .into_iter()
+        .map(|puuid| {
+            let (highlights, lowlights) = clip_candidates(game, events_jsonl, puuid);
+            (puuid.clone(), highlights, lowlights)
+        })
+        .collect();
+
+    let mut highlight_picks =
+        assign_side(&per_player.iter().map(|(p, h, _)| (p.as_str(), h.as_slice())).collect::<Vec<_>>());
+    let mut lowlight_picks =
+        assign_side(&per_player.iter().map(|(p, _, l)| (p.as_str(), l.as_slice())).collect::<Vec<_>>());
+    per_player
+        .iter()
+        .map(|(puuid, _, _)| {
+            (puuid.clone(), highlight_picks.remove(puuid.as_str()), lowlight_picks.remove(puuid.as_str()))
+        })
+        .collect()
+}
+
+/// Greedy joint assignment for one side: the strongest unassigned claim wins
+/// each round, and a player whose best candidate overlaps a claimed window
+/// diverts to their best free alternative when it's worth at least half their
+/// best — otherwise the shared moment really is their story too.
+fn assign_side(players: &[(&str, &[Candidate])]) -> std::collections::HashMap<String, Candidate> {
+    let mut claimed: Vec<(i64, i64)> = Vec::new();
+    let mut assigned = std::collections::HashMap::new();
+    let mut remaining: Vec<&(&str, &[Candidate])> = players.iter().collect();
+
+    while !remaining.is_empty() {
+        let mut round_best: Option<(usize, Candidate)> = None;
+        for (index, (_, candidates)) in remaining.iter().enumerate() {
+            let best_any = candidates.iter().max_by_key(|c| (c.score, std::cmp::Reverse(c.t_ms)));
+            let Some(best_any) = best_any else {
+                continue;
+            };
+            let best_free = candidates
+                .iter()
+                .filter(|c| !claimed.iter().any(|w| overlaps(c, *w)))
+                .max_by_key(|c| (c.score, std::cmp::Reverse(c.t_ms)));
+            let choice = match best_free {
+                Some(free) if free.score * 2 >= best_any.score => free,
+                _ => best_any,
+            };
+            if round_best.as_ref().is_none_or(|(_, current)| choice.score > current.score) {
+                round_best = Some((index, choice.clone()));
+            }
+        }
+        let Some((index, choice)) = round_best else {
+            break;
+        };
+        let (puuid, _) = remaining.remove(index);
+        claimed.push((choice.seek_s, choice.seek_s + choice.dur_s));
+        assigned.insert((*puuid).to_string(), choice);
+    }
+    assigned
+}
+
+/// Two clip windows showing substantially the same footage: the overlap
+/// covers more than half of the shorter window.
+fn overlaps(candidate: &Candidate, (start, end): (i64, i64)) -> bool {
+    let (c_start, c_end) = (candidate.seek_s, candidate.seek_s + candidate.dur_s);
+    let overlap = c_end.min(end) - c_start.max(start);
+    overlap * 2 > candidate.dur_s.min(end - start)
 }
 
 /// Render the clip windows as JSON keyed by `m:ss`, so `highlight.sh` can look
@@ -1051,22 +1130,36 @@ mod tests {
     /// The headline: Red side (Moon's team) won multiple early fights but
     /// squandered them, while Blue side converted its fights.
     #[test]
-    fn overview_picks_best_scored_not_first() {
-        let candidate = |t_ms: i64, score: i64, summary: &str| Candidate {
-            t_ms,
-            seek_s: 0,
-            dur_s: 10,
+    fn assignment_spreads_players_across_distinct_moments() {
+        let candidate = |seek: i64, score: i64, summary: &str| Candidate {
+            t_ms: seek * 1000,
+            seek_s: seek,
+            dur_s: 20,
             summary: summary.to_string(),
             score,
         };
-        // Candidates arrive in chronological order; the pick must follow
-        // score, not position.
-        let md =
-            render_overview_md(&[candidate(60_000, 3, "small skirmish"), candidate(125_000, 9, "the outplay")], &[]);
-        assert!(md.contains("**2:05** — the outplay"), "picked by score: {md}");
-        assert!(!md.contains("small skirmish"));
+        // Both players' best is the same teamfight window; B has a decent
+        // alternative elsewhere, so B diverts and the channel gets two
+        // different moments.
+        let a_cands = vec![candidate(600, 10, "the teamfight")];
+        let b_cands = vec![candidate(605, 8, "the same teamfight"), candidate(900, 6, "a solo pick")];
+        let picks = assign_side(&[("a", a_cands.as_slice()), ("b", b_cands.as_slice())]);
+        assert_eq!(picks["a"].summary, "the teamfight");
+        assert_eq!(picks["b"].summary, "a solo pick", "diverted off the claimed window");
+
+        // But when the alternative is far weaker, the shared moment stays.
+        let c_cands = vec![candidate(605, 9, "the same teamfight again"), candidate(900, 2, "farming")];
+        let picks = assign_side(&[("a", a_cands.as_slice()), ("c", c_cands.as_slice())]);
+        assert_eq!(picks["c"].summary, "the same teamfight again", "no worthwhile alternative");
+    }
+
+    #[test]
+    fn picks_render_by_section() {
+        let best = Candidate { t_ms: 125_000, seek_s: 118, dur_s: 20, summary: "the outplay".to_string(), score: 9 };
+        let md = render_picks_md(Some(&best), None);
+        assert!(md.contains("**2:05** — the outplay"), "{md}");
         assert!(md.starts_with("## Highlight"));
-        assert!(!md.contains("## Lowlight"), "no lowlight candidates, no section");
+        assert!(!md.contains("## Lowlight"), "no lowlight pick, no section");
     }
 
     #[test]
