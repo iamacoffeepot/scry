@@ -396,10 +396,20 @@ async fn try_game_clips(
         })?;
     }
     tracing::info!(%platform, game_id, perspectives = batch.len(), "recording clips");
+    // Each spec carries the perspective's champion so the script can lock the
+    // replay camera on them; without it the replay's auto-director starts at
+    // the fountain and takes seconds (sometimes the whole clip) to find the
+    // action. Best-effort: an unreadable archive degrades to no lock.
+    let game = crate::read_archive(&dir).ok().map(|(game, _)| game);
     let mut command = tokio::process::Command::new("scripts/highlight.sh");
     command.arg(&dir);
     for (suffix, _, picks) in &batch {
-        command.arg(clip_spec(suffix, picks));
+        let champion = game
+            .as_ref()
+            .and_then(|g| g.info.participants.iter().find(|p| p.puuid == picks.puuid))
+            .map(|p| p.champion_name.as_str())
+            .unwrap_or_default();
+        command.arg(clip_spec(suffix, picks, champion));
     }
     let status = command.status().await.context("running scripts/highlight.sh")?;
     if !status.success() {
@@ -424,14 +434,15 @@ async fn try_game_clips(
 }
 
 /// One perspective's argument to `highlight.sh`:
-/// `<suffix>|<hl_seek>,<hl_dur>|<ll_seek>,<ll_dur>` with an empty field for a
-/// side that has no pick — the journaled clip windows, so the script records
-/// without parsing any artifact.
-fn clip_spec(suffix: &str, picks: &PicksAssigned) -> String {
+/// `<suffix>|<hl_seek>,<hl_dur>|<ll_seek>,<ll_dur>|<champion>` with an empty
+/// field for a side that has no pick — the journaled clip windows, so the
+/// script records without parsing any artifact. `champion` locks the replay
+/// camera on the perspective (empty = no lock, the auto-director fallback).
+fn clip_spec(suffix: &str, picks: &PicksAssigned, champion: &str) -> String {
     let side = |pick: &Option<crate::journal::ClipPick>| {
         pick.as_ref().map(|c| format!("{},{}", c.seek_secs, c.duration_secs)).unwrap_or_default()
     };
-    format!("{suffix}|{}|{}", side(&picks.highlight), side(&picks.lowlight))
+    format!("{suffix}|{}|{}|{champion}", side(&picks.highlight), side(&picks.lowlight))
 }
 
 /// Whether the replay for `game_id` is downloaded and verified (metadata

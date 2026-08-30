@@ -9,12 +9,15 @@
 # script each perspective's clip windows directly — one spec argument per
 # perspective:
 #
-#   <suffix>|<hl_seek>,<hl_dur>|<ll_seek>,<ll_dur>
+#   <suffix>|<hl_seek>,<hl_dur>|<ll_seek>,<ll_dur>|<champion>
 #
 # where <suffix> selects that player's output names (e.g. `-Moon_132`) and a
-# side with no pick is an empty field. This script just loads the replay ONCE,
-# seeks each window, records it, and transcodes the game's native webm to a
-# Discord-friendly mp4.
+# side with no pick is an empty field. <champion> locks the replay camera on
+# that perspective (the render API resolves a champion name to its player);
+# empty falls back to the auto-director, which starts at the fountain and can
+# take seconds — or the whole clip — to find the action. This script just
+# loads the replay ONCE, seeks each window, records it, and transcodes the
+# game's native webm to a Discord-friendly mp4.
 #
 # Requires the League CLIENT running + logged in on the match's region/patch,
 # with EnableReplayApi=1 in game.cfg. See memory/reference_lol_replay_recording.
@@ -79,6 +82,23 @@ fi
 # Clean shot: HUD off, full vision.
 curl -sk --max-time 5 -X POST "$rp/render" -H "Content-Type: application/json" -d '{"interfaceAll":false,"fogOfWar":false}' -o /dev/null
 
+# lock_camera <champion> — attach the camera to a champion's player. Right
+# after the replay comes up the render API accepts the POST but resolves the
+# selection to '' (camera attached to nothing = free camera at the fountain),
+# so retry until the response echoes a non-empty selectionName. On persistent
+# failure fall through unlocked — the auto-director is worse, not fatal.
+lock_camera() {
+  local champ="$1" sel
+  for _ in $(seq 1 10); do
+    sel="$(curl -sk --max-time 5 -X POST "$rp/render" -H "Content-Type: application/json" \
+      -d "{\"selectionName\":\"$champ\",\"cameraAttached\":true}" \
+      | python3 -c "import sys,json;print(json.load(sys.stdin).get('selectionName',''))" 2>/dev/null)"
+    [[ -n "$sel" ]] && { echo "  camera locked on $champ ($sel)"; return 0; }
+    sleep 2
+  done
+  echo "  camera lock on $champ never resolved; recording unlocked"
+}
+
 # record_clip <start_seconds> <duration_seconds> <out.mp4> — live record button,
 # no offline render. Seeks PREROLL before the window so it streams in, then
 # records exactly <duration> seconds of the play.
@@ -111,7 +131,9 @@ record_window() {
 
 # One loaded replay serves every perspective: seeks are cheap, loads aren't.
 for spec in "${specs[@]}"; do
-  IFS='|' read -r sfx hl ll <<< "$spec"
+  IFS='|' read -r sfx hl ll champ <<< "$spec"
+  # Lock the camera on this perspective's champion before its windows.
+  [[ -n "${champ:-}" ]] && lock_camera "$champ"
   if [[ -n "$hl" ]]; then echo "recording highlight$sfx"; record_window "$hl" "$dir/highlight$sfx.mp4"; fi
   if [[ -n "$ll" ]]; then echo "recording lowlight$sfx"; record_window "$ll" "$dir/lowlight$sfx.mp4"; fi
 done
