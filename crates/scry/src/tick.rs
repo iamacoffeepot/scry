@@ -294,7 +294,11 @@ async fn try_game_clips(
 ) -> Result<ClipOutcome> {
     let (platform, game_id) = (platform.clone(), *game_id);
     let dir = cli.archive.join(&platform).join(game_id.to_string());
-    if projection.message_id(&platform, game_id).is_none() {
+    // Each perspective edits its own post; a job without a recorded message
+    // can't attach anywhere.
+    let jobs: Vec<_> =
+        jobs.iter().filter(|job| projection.message_id(&platform, game_id, &job.riot_id).is_some()).collect();
+    if jobs.is_empty() {
         return Ok(ClipOutcome::Skipped);
     }
 
@@ -679,31 +683,30 @@ fn backfill_rank_lines(cli: &Cli, journal: &Journal) -> Result<()> {
         let Some(game_id) = dir.file_name().and_then(|n| n.to_str()).and_then(|n| n.parse::<u64>().ok()) else {
             continue;
         };
-        if projection.rank_line(&platform, game_id).is_some() {
-            continue;
-        }
-        let Some(message_id) = projection.message_id(&platform, game_id) else {
-            continue;
-        };
         let Some(rank) = std::fs::read_to_string(dir.join(".rank.json"))
             .ok()
             .and_then(|json| serde_json::from_str::<crate::stats::RankInfo>(&json).ok())
         else {
             continue;
         };
-        let Some(job) = projection.pending_clips().into_iter().find(|(p, g, _)| *p == platform && *g == game_id) else {
-            continue; // A finished clip job never edits again; skip.
-        };
-        journal.append(&crate::journal::GamePosted {
-            platform,
-            game_id,
-            riot_id: job.2.riot_id.clone(),
-            queue_id: read_queue_id(&dir).unwrap_or(0),
-            message_id: message_id.to_string(),
-            rank: Some(rank),
-            puuid: None,
-        })?;
-        backfilled += 1;
+        for job in projection.clip_jobs(&platform, game_id) {
+            if job.done || projection.rank_line(&platform, game_id, &job.riot_id).is_some() {
+                continue; // A finished job never edits again; a lined one is set.
+            }
+            let Some(message_id) = projection.message_id(&platform, game_id, &job.riot_id) else {
+                continue;
+            };
+            journal.append(&crate::journal::GamePosted {
+                platform: platform.clone(),
+                game_id,
+                riot_id: job.riot_id.clone(),
+                queue_id: read_queue_id(&dir).unwrap_or(0),
+                message_id: message_id.to_string(),
+                rank: Some(rank.clone()),
+                puuid: None,
+            })?;
+            backfilled += 1;
+        }
     }
     tracing::info!(backfilled, "journal already imported; backfilled legacy rank lines for pending clip edits");
     Ok(())

@@ -174,8 +174,9 @@ pub struct ClipJob {
 pub struct Projection {
     /// (platform, game_id, riot_id lowercase) triples already posted.
     posted: std::collections::HashSet<(String, u64, String)>,
-    /// Discord message id per posted game (last post wins).
-    message_ids: HashMap<(String, u64), String>,
+    /// Discord message id per (game, identity) — every tracked player's post
+    /// of a shared game is its own message.
+    message_ids: HashMap<(String, u64, String), String>,
     /// Clip job state per (platform, game, identity) — tracked players share
     /// games, and each poster gets their own perspective recorded.
     clips: HashMap<(String, u64, String), ClipJob>,
@@ -187,8 +188,8 @@ pub struct Projection {
     pins: HashMap<String, String>,
     /// Last observed ladder value per (puuid, queue_id).
     ranks: HashMap<(String, u32), i32>,
-    /// Post-time LP line per posted game (last post wins).
-    rank_lines: HashMap<(String, u64), crate::stats::RankInfo>,
+    /// Post-time LP line per (game, identity).
+    rank_lines: HashMap<(String, u64, String), crate::stats::RankInfo>,
 }
 
 impl Projection {
@@ -207,11 +208,12 @@ impl Projection {
             *floor = (event.platform.clone(), event.game_id);
         }
         self.posted.insert((event.platform, key.1, ident.clone()));
+        let per_player = (key.0.clone(), key.1, ident.clone());
         if !event.message_id.is_empty() {
-            self.message_ids.insert(key.clone(), event.message_id);
+            self.message_ids.insert(per_player.clone(), event.message_id);
         }
         if let Some(rank) = event.rank {
-            self.rank_lines.insert(key.clone(), rank);
+            self.rank_lines.insert(per_player, rank);
         }
         let job = self.clips.entry((key.0, key.1, ident)).or_default();
         // Refresh the display name; a re-post never resurrects a finished job.
@@ -264,9 +266,9 @@ impl Projection {
         self.posted.contains(&(platform.to_string(), game_id, self.ident(riot_id)))
     }
 
-    /// The Discord message id recorded for a posted game.
-    pub fn message_id(&self, platform: &str, game_id: u64) -> Option<&str> {
-        self.message_ids.get(&(platform.to_string(), game_id)).map(String::as_str)
+    /// The Discord message id recorded for this player's post of a game.
+    pub fn message_id(&self, platform: &str, game_id: u64, riot_id: &str) -> Option<&str> {
+        self.message_ids.get(&(platform.to_string(), game_id, self.ident(riot_id))).map(String::as_str)
     }
 
     /// Unfinished clip jobs, newest game first (the old `sort -r` order: the
@@ -307,9 +309,9 @@ impl Projection {
         self.clips.iter().filter(|((p, g, _), _)| p == platform && *g == game_id).map(|(_, job)| job).collect()
     }
 
-    /// The LP line rendered when this game posted, if any.
-    pub fn rank_line(&self, platform: &str, game_id: u64) -> Option<&crate::stats::RankInfo> {
-        self.rank_lines.get(&(platform.to_string(), game_id))
+    /// The LP line rendered when this player's post of the game went out.
+    pub fn rank_line(&self, platform: &str, game_id: u64, riot_id: &str) -> Option<&crate::stats::RankInfo> {
+        self.rank_lines.get(&(platform.to_string(), game_id, self.ident(riot_id)))
     }
 
     /// The previous ladder value for (puuid, queue), the LP-delta baseline.
@@ -362,7 +364,8 @@ mod tests {
 
         assert!(projection.is_posted("NA1", 100, "moon#132"), "case-insensitive dedup");
         assert!(!projection.is_posted("NA1", 102, "Moon#132"));
-        assert_eq!(projection.message_id("NA1", 101), Some("m-101"));
+        assert_eq!(projection.message_id("NA1", 101, "Himles#9267"), Some("m-101"));
+        assert_eq!(projection.message_id("NA1", 101, "Moon#132"), None, "another player's post is not mine");
         let pending = projection.pending_clips();
         assert_eq!(pending.len(), 1, "game 100 finished; only 101 pending");
         assert_eq!((pending[0].0.as_str(), pending[0].1), ("NA1", 101));

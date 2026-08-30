@@ -248,7 +248,7 @@ async fn post_from_archive(cli: &Cli, dir: &Path) -> Result<()> {
     // already advanced at post time, so a second diff would read zero. Reuse
     // the LP line the post's game_posted event recorded.
     if cli.edit {
-        match_summary.rank = state.rank_line(platform, game_id).cloned();
+        match_summary.rank = state.rank_line(platform, game_id, riot_id).cloned();
     } else if cli.track_lp
         && let Some(queue) = rank::queue_type(game.info.queue_id)
     {
@@ -348,8 +348,8 @@ async fn post_from_archive(cli: &Cli, dir: &Path) -> Result<()> {
     let webhook = discord::Webhook::new(cli.webhook.clone());
     if cli.edit {
         // Attach the clips to the message the journal recorded at post time.
-        let message_id = state.message_id(platform, game_id).with_context(|| {
-            format!("no posted message in the journal for {} (was this archive posted?)", dir.display())
+        let message_id = state.message_id(platform, game_id, riot_id).with_context(|| {
+            format!("no posted message in the journal for {riot_id} in {} (was this archive posted?)", dir.display())
         })?;
         webhook.edit(message_id, &message, &attachments).await?;
         journal.append(&journal::ClipsAttached {
