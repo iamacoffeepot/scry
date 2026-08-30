@@ -1,9 +1,11 @@
 //! `--tick`: one full poll pass in Rust, journal-driven — the port of
 //! poll.sh's `poll_all` + `clips_pass`. The shell keeps only the while/sleep.
 //!
-//! Per tracked account/queue: the last few match ids → for each the journal
-//! hasn't seen for that player (oldest first, so the channel reads
-//! chronologically): dump the archive → analyze (which also writes the
+//! The pass runs discover-then-post so the channel reads in one global
+//! chronology: every account/queue's unposted games (floor-guarded) are
+//! dumped and stamped with their game-end time first, then the whole batch
+//! posts sorted by when the games actually finished — regardless of which
+//! tracked player they belong to. Per game: analyze (which also writes the
 //! deterministic clip pick + captions into `overview.md`) → post (which
 //! appends `game_posted` + `rank_observed`). Then the serialized clip pass:
 //! pending jobs newest-first, client idle only (re-checked per job),
@@ -38,11 +40,22 @@ pub async fn run(cli: &Cli) -> Result<()> {
         .with_context(|| format!("reading watch list {}", cli.accounts.display()))?;
     let journal = Journal::open(&cli.journal)?;
 
+    // Phase 1: discover and dump every unposted game across all accounts.
+    let projection = journal.fold()?;
+    let mut pending = Vec::new();
     for account in &accounts {
-        for queue in &account.queues {
-            if let Err(error) = process(cli, &journal, account, *queue).await {
-                tracing::warn!(riot_id = %account.riot_id, error = %format!("{error:#}"), "account pass failed");
-            }
+        if let Err(error) = discover(cli, &projection, account, &mut pending).await {
+            tracing::warn!(riot_id = %account.riot_id, error = %format!("{error:#}"), "account pass failed");
+        }
+    }
+
+    // Phase 2: post in one global chronology — the order the games finished,
+    // regardless of account (ties: game id, then player, for determinism).
+    pending.sort_by(|a, b| (a.end_millis, a.game_id, &a.riot_id).cmp(&(b.end_millis, b.game_id, &b.riot_id)));
+    for post in &pending {
+        tracing::info!(riot_id = %post.riot_id, match_id = %post.match_id, "new game");
+        if let Err(error) = post_one(cli, post).await {
+            tracing::warn!(riot_id = %post.riot_id, match_id = %post.match_id, error = %format!("{error:#}"), "post failed");
         }
     }
 
@@ -54,51 +67,87 @@ pub async fn run(cli: &Cli) -> Result<()> {
     Ok(())
 }
 
-/// Check one (account, queue) for newly-completed games and run each through
-/// the dump → analyze → post pipeline, oldest first.
-async fn process(cli: &Cli, journal: &Journal, account: &Account, queue: Option<u32>) -> Result<()> {
+/// One discovered game waiting to post.
+struct PendingPost {
+    riot_id: String,
+    match_id: String,
+    game_id: u64,
+    /// When the game finished (unix millis) — the global posting order.
+    end_millis: i64,
+    dir: PathBuf,
+}
+
+/// Find one account's newly-completed games across its queues and dump each
+/// into the archive, collecting them as [`PendingPost`]s for the global sort.
+async fn discover(
+    cli: &Cli,
+    projection: &crate::journal::Projection,
+    account: &Account,
+    pending: &mut Vec<PendingPost>,
+) -> Result<()> {
     let client = riot::Client::new(&cli.api_key, &account.region)?;
     let puuid =
         client.resolve_puuid(&account.riot_id).await.with_context(|| format!("resolving {}", account.riot_id))?;
 
-    let queue_u16 = queue.map(|q| u16::try_from(q).unwrap_or(0));
-    let ids = client.recent_match_ids(&puuid, CATCHUP_IDS, queue_u16).await?;
-    if ids.is_empty() {
-        tracing::info!(riot_id = %account.riot_id, ?queue, "no recent game");
-        return Ok(());
-    }
+    for queue in &account.queues {
+        let queue_u16 = queue.map(|q| u16::try_from(q).unwrap_or(0));
+        let ids = client.recent_match_ids(&puuid, CATCHUP_IDS, queue_u16).await?;
 
-    // Oldest unposted first, so a multi-game session posts chronologically.
-    // The floor keeps the window from dumping history: only games newer than
-    // the newest already-posted game are news; a player/queue with no posted
-    // history backfills the single newest game, never the whole window.
-    let projection = journal.fold()?;
-    let floor = projection.newest_posted(&account.riot_id, queue);
-    let newest_in_window = ids.first().map(|id| split_match_id(id)).transpose()?.map(|(_, game_id)| game_id);
-    for match_id in ids.iter().rev() {
-        let (platform, game_id) = split_match_id(match_id)?;
-        if projection.is_posted(platform, game_id, &account.riot_id) {
-            continue;
+        // The floor keeps the window from dumping history: only games newer
+        // than the newest already-posted game are news; a player/queue with
+        // no posted history backfills the single newest game, never the
+        // whole window.
+        let floor = projection.newest_posted(&account.riot_id, *queue);
+        let newest_in_window = ids.first().map(|id| split_match_id(id)).transpose()?.map(|(_, game_id)| game_id);
+        for match_id in &ids {
+            let (platform, game_id) = split_match_id(match_id)?;
+            if projection.is_posted(platform, game_id, &account.riot_id) {
+                continue;
+            }
+            let is_newest = Some(game_id) == newest_in_window;
+            if !is_newest && !floor.is_some_and(|f| game_id > f) {
+                continue;
+            }
+            // An overlapping queue spec ("420,all") may surface a game twice.
+            if pending.iter().any(|p| p.game_id == game_id && p.riot_id == account.riot_id) {
+                continue;
+            }
+
+            let match_json = client.raw_match_json(match_id).await?;
+            let timeline = client.raw_timeline_json(match_id).await?;
+            let dir = crate::archive::write(&cli.archive, match_id, &match_json, &timeline)?;
+            pending.push(PendingPost {
+                riot_id: account.riot_id.clone(),
+                match_id: match_id.clone(),
+                game_id,
+                end_millis: game_end_millis(&match_json),
+                dir,
+            });
         }
-        let is_newest = Some(game_id) == newest_in_window;
-        if !is_newest && !floor.is_some_and(|f| game_id > f) {
-            continue;
-        }
-        tracing::info!(riot_id = %account.riot_id, %match_id, "new game");
-
-        let match_json = client.raw_match_json(match_id).await?;
-        let timeline = client.raw_timeline_json(match_id).await?;
-        let dir = crate::archive::write(&cli.archive, match_id, &match_json, &timeline)?;
-
-        // analyze writes moments.md, clips.json, and the deterministic
-        // overview.md (clip picks + captions).
-        crate::analyze_archive(&account.riot_id, &dir)?;
-
-        // The post path appends `game_posted` (+ `rank_observed`).
-        crate::post_from_archive(&post_cli(cli, &account.riot_id, &dir, /* edit */ false), &dir).await?;
-        tracing::info!(riot_id = %account.riot_id, %match_id, "posted");
     }
     Ok(())
+}
+
+/// Analyze and post one discovered game.
+async fn post_one(cli: &Cli, post: &PendingPost) -> Result<()> {
+    // analyze writes moments.md, clips.json, and the deterministic
+    // overview.md (clip picks + captions).
+    crate::analyze_archive(&post.riot_id, &post.dir)?;
+    // The post path appends `game_posted` (+ `rank_observed`).
+    crate::post_from_archive(&post_cli(cli, &post.riot_id, &post.dir, /* edit */ false), &post.dir).await?;
+    tracing::info!(riot_id = %post.riot_id, match_id = %post.match_id, "posted");
+    Ok(())
+}
+
+/// When the game finished, unix millis: `gameEndTimestamp` where Riot
+/// provides it, else start + duration, else 0 (sorting by game id alone).
+fn game_end_millis(match_json: &serde_json::Value) -> i64 {
+    let info = &match_json["info"];
+    info.get("gameEndTimestamp").and_then(serde_json::Value::as_i64).unwrap_or_else(|| {
+        let start = info.get("gameStartTimestamp").and_then(serde_json::Value::as_i64).unwrap_or(0);
+        let duration_secs = info.get("gameDuration").and_then(serde_json::Value::as_i64).unwrap_or(0);
+        start + duration_secs * 1000
+    })
 }
 
 /// Record and attach clips for pending games, newest first — serialized,
@@ -370,6 +419,15 @@ mod tests {
     fn match_ids_split_into_platform_and_game() {
         assert_eq!(split_match_id("NA1_5630828116").unwrap(), ("NA1", 5630828116));
         assert!(split_match_id("garbage").is_err());
+    }
+
+    #[test]
+    fn game_end_falls_back_from_end_timestamp_to_start_plus_duration() {
+        let with_end = serde_json::json!({"info": {"gameEndTimestamp": 1700000900000i64, "gameStartTimestamp": 1700000000000i64, "gameDuration": 900}});
+        let without_end = serde_json::json!({"info": {"gameStartTimestamp": 1700000000000i64, "gameDuration": 900}});
+        assert_eq!(game_end_millis(&with_end), 1700000900000);
+        assert_eq!(game_end_millis(&without_end), 1700000900000);
+        assert_eq!(game_end_millis(&serde_json::json!({})), 0);
     }
 
     #[test]
