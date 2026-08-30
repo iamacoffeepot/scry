@@ -155,20 +155,22 @@ fn analyze_archive(riot_id: &str, dir: &Path) -> Result<()> {
     // Highlight/Lowlight clip candidates it chooses a timestamp from.
     let (highlights, lowlights) = analysis::clip_candidates(&game, &events, &puuid);
     let md = analysis::render_moments_md(&moments, &highlights, &lowlights, name);
-    let out = dir.join("moments.md");
+    let suffix = format!("-{}", tick::slug(riot_id));
+    let out = dir.join(format!("moments{suffix}.md"));
     fs::write(&out, md).with_context(|| format!("writing {}", out.display()))?;
 
     // Sidecar the per-candidate clip windows (seek + duration) keyed by m:ss, so
     // highlight.sh records a window sized to each play rather than a flat length.
     let clips = analysis::render_clips_json(&highlights, &lowlights);
-    fs::write(dir.join("clips.json"), clips)
-        .with_context(|| format!("writing {}", dir.join("clips.json").display()))?;
+    fs::write(dir.join(format!("clips{suffix}.json")), clips)
+        .with_context(|| format!("writing clips{suffix}.json in {}", dir.display()))?;
 
     // The deterministic clip pick: best-scored highlight + lowlight become the
     // `## Highlight` / `## Lowlight` sections highlight.sh reads timestamps
-    // from and the post uses as clip captions.
-    fs::write(dir.join("overview.md"), analysis::render_overview_md(&highlights, &lowlights))
-        .with_context(|| format!("writing {}", dir.join("overview.md").display()))?;
+    // from and the post uses as clip captions — all per player, since picks
+    // differ per tracked perspective in a shared game.
+    fs::write(dir.join(format!("overview{suffix}.md")), analysis::render_overview_md(&highlights, &lowlights))
+        .with_context(|| format!("writing overview{suffix}.md in {}", dir.display()))?;
 
     println!("\n{} moments -> {}", moments.len(), out.display());
     Ok(())
@@ -261,19 +263,26 @@ async fn post_from_archive(cli: &Cli, dir: &Path) -> Result<()> {
         None
     };
 
-    // Embed the Highlight/Lowlight clips if they've been recorded into the
-    // archive dir (kept as first-class artifacts next to match.json / moments.md).
-    let mut embed_clip = |name: &'static str| -> Result<Option<&'static str>> {
-        let path = dir.join(name);
-        if !path.exists() {
+    // Embed this player's Highlight/Lowlight clips if they've been recorded
+    // into the archive dir; the unsuffixed names are the legacy fallback for
+    // games posted before perspectives split.
+    let clip_suffix = format!("-{}", tick::slug(riot_id));
+    let mut embed_clip = |base: &str| -> Result<Option<String>> {
+        let suffixed = format!("{base}{clip_suffix}.mp4");
+        let name = if dir.join(&suffixed).exists() {
+            suffixed
+        } else if dir.join(format!("{base}.mp4")).exists() {
+            format!("{base}.mp4")
+        } else {
             return Ok(None);
-        }
-        let bytes = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
-        attachments.push(discord::Attachment { filename: name.to_string(), bytes });
+        };
+        let bytes = fs::read(dir.join(&name)).with_context(|| format!("reading {} in {}", name, dir.display()))?;
+        attachments.push(discord::Attachment { filename: name.clone(), bytes });
         Ok(Some(name))
     };
-    let highlight = embed_clip("highlight.mp4")?;
-    let lowlight = embed_clip("lowlight.mp4")?;
+    let highlight = embed_clip("highlight")?;
+    let lowlight = embed_clip("lowlight")?;
+    let (highlight, lowlight) = (highlight.as_deref(), lowlight.as_deref());
 
     // With an overview, stats + separator + overview are one CV2 container.
     // --no-overview renders a minimal header + stats + clips embed instead
@@ -299,7 +308,11 @@ async fn post_from_archive(cli: &Cli, dir: &Path) -> Result<()> {
             format!("no posted message in the journal for {} (was this archive posted?)", dir.display())
         })?;
         webhook.edit(message_id, &message, &attachments).await?;
-        journal.append(&journal::ClipsAttached { platform: platform.to_string(), game_id })?;
+        journal.append(&journal::ClipsAttached {
+            platform: platform.to_string(),
+            game_id,
+            riot_id: Some(riot_id.to_string()),
+        })?;
         tracing::info!(dir = %dir.display(), "edited posted message with clips");
     } else {
         // Initial post: the game_posted event carries the message id the clip

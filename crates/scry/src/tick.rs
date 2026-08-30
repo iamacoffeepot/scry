@@ -197,11 +197,12 @@ fn rewrite_watch_list(path: &Path, old: &str, new: &str) -> Result<()> {
 
 /// Analyze and post one discovered game.
 async fn post_one(cli: &Cli, post: &PendingPost) -> Result<()> {
-    // analyze writes moments.md, clips.json, and the deterministic
-    // overview.md (clip picks + captions).
+    // analyze writes the per-player moments/clips/overview artifacts (clip
+    // picks + captions differ per tracked perspective).
     crate::analyze_archive(&post.riot_id, &post.dir)?;
     // The post path appends `game_posted` (+ `rank_observed`).
-    crate::post_from_archive(&post_cli(cli, &post.riot_id, &post.dir, /* edit */ false), &post.dir).await?;
+    let overview = post.dir.join(format!("overview-{}.md", slug(&post.riot_id)));
+    crate::post_from_archive(&post_cli(cli, &post.riot_id, &overview, &post.dir, /* edit */ false), &post.dir).await?;
     tracing::info!(riot_id = %post.riot_id, match_id = %post.match_id, "posted");
     Ok(())
 }
@@ -217,65 +218,156 @@ fn game_end_millis(match_json: &serde_json::Value) -> i64 {
     })
 }
 
-/// Record and attach clips for pending games, newest first — serialized,
-/// idle-only, retry-capped (the replay client is a contended singleton), and
-/// bounded by `--clips-per-pass` since each recording runs in real time.
+/// Record and attach clips for pending jobs, newest game first — one job per
+/// (game, tracked player), so N tracked players in one lobby each get their
+/// own perspective on their own post. Serialized, idle-only, retry-capped
+/// (the replay client is a contended singleton), bounded by
+/// `--clips-per-pass`; jobs whose replay hasn't finished verifying get one
+/// in-pass second chance after a minute instead of waiting a whole interval.
 async fn clips_pass(cli: &Cli, journal: &Journal) -> Result<()> {
     let mut recorded = 0;
     let projection = journal.fold()?;
     let client_patch = client_replay_patch().await;
-    for (platform, game_id, job) in projection.pending_clips() {
-        let dir = cli.archive.join(&platform).join(game_id.to_string());
-        if projection.message_id(&platform, game_id).is_none() || !dir.join("overview.md").exists() {
-            continue;
-        }
 
-        // Replays are patch-gated: a game from a previous patch can never
-        // play again, so abandon immediately rather than burning the retry
-        // budget on four-minute "replay API never came up" timeouts.
-        if let (Some(client), Some(game)) = (client_patch.as_deref(), game_patch(&dir))
-            && client != game
-        {
-            tracing::info!(%platform, game_id, game_patch = %game, client_patch = %client, "replay predates the current patch; abandoning clips");
-            journal.append(&ClipsAbandoned { platform, game_id, tries: job.tries })?;
-            continue;
+    let mut deferred = Vec::new();
+    for entry in projection.pending_clips() {
+        match try_clip(cli, journal, &projection, client_patch.as_deref(), &entry).await? {
+            ClipOutcome::Recorded => {
+                recorded += 1;
+                if recorded >= cli.clips_per_pass {
+                    return Ok(());
+                }
+            }
+            ClipOutcome::NotReady => deferred.push(entry),
+            ClipOutcome::ClientBusy => return Ok(()),
+            ClipOutcome::Skipped => {}
         }
+    }
 
-        // Re-checked every iteration: recording kills the game process, so
-        // only drive a replay while the client sits idle. An unreachable
-        // client (League closed) ends the pass without burning a try.
-        match client_phase().await.as_deref() {
-            Some(phase) if phase.contains("None") || phase.contains("Lobby") => {}
-            _ => return Ok(()),
-        }
-
-        if job.tries >= cli.clip_max_tries {
-            tracing::info!(%platform, game_id, tries = job.tries, "giving up on clips");
-            journal.append(&ClipsAbandoned { platform, game_id, tries: job.tries })?;
-            continue;
-        }
-        journal.append(&ClipAttempt { platform: platform.clone(), game_id, try_number: job.tries + 1 })?;
-
-        tracing::info!(%platform, game_id, try_number = job.tries + 1, "recording clips");
-        let status = tokio::process::Command::new("scripts/highlight.sh")
-            .arg(&dir)
-            .status()
-            .await
-            .context("running scripts/highlight.sh")?;
-        if !status.success() || (!dir.join("highlight.mp4").exists() && !dir.join("lowlight.mp4").exists()) {
-            tracing::info!(%platform, game_id, "clips not ready (will retry)");
-            continue;
-        }
-
-        // The edit path appends `clips_attached` on success.
-        crate::post_from_archive(&post_cli(cli, &job.riot_id, &dir, /* edit */ true), &dir).await?;
-        tracing::info!(%platform, game_id, "clips attached");
-        recorded += 1;
-        if recorded >= cli.clips_per_pass {
-            return Ok(()); // Bound the pass; the next tick continues the queue.
+    if !deferred.is_empty() && recorded < cli.clips_per_pass {
+        // A fresh replay verifies within a minute or two of the game ending.
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        for entry in deferred {
+            if let ClipOutcome::Recorded = try_clip(cli, journal, &projection, client_patch.as_deref(), &entry).await? {
+                recorded += 1;
+                if recorded >= cli.clips_per_pass {
+                    return Ok(());
+                }
+            }
         }
     }
     Ok(())
+}
+
+/// One clip job's attempt this pass.
+enum ClipOutcome {
+    Recorded,
+    /// The replay hasn't finished downloading/verifying — retryable cheaply,
+    /// no try burned.
+    NotReady,
+    /// The client left idle; the whole pass must stop.
+    ClientBusy,
+    Skipped,
+}
+
+async fn try_clip(
+    cli: &Cli,
+    journal: &Journal,
+    projection: &Projection,
+    client_patch: Option<&str>,
+    (platform, game_id, job): &(String, u64, crate::journal::ClipJob),
+) -> Result<ClipOutcome> {
+    let (platform, game_id) = (platform.clone(), *game_id);
+    let dir = cli.archive.join(&platform).join(game_id.to_string());
+    if projection.message_id(&platform, game_id).is_none() {
+        return Ok(ClipOutcome::Skipped);
+    }
+
+    // Per-player artifacts (`overview-<slug>.md`): generate this perspective's
+    // analysis if it's missing (a job from before perspectives split). A
+    // perspective that can't analyze (e.g. the player renamed since the game)
+    // never will — abandon it rather than warn forever.
+    let suffix = format!("-{}", slug(&job.riot_id));
+    if !dir.join(format!("overview{suffix}.md")).exists()
+        && let Err(error) = crate::analyze_archive(&job.riot_id, &dir)
+    {
+        tracing::warn!(%platform, game_id, riot_id = %job.riot_id, error = %format!("{error:#}"), "perspective analysis failed; abandoning clips");
+        journal.append(&ClipsAbandoned { platform, game_id, tries: job.tries, riot_id: Some(job.riot_id.clone()) })?;
+        return Ok(ClipOutcome::Skipped);
+    }
+
+    // Replays are patch-gated: a game from a previous patch can never play
+    // again, so abandon immediately rather than burning the retry budget.
+    if let (Some(client), Some(game)) = (client_patch, game_patch(&dir))
+        && client != game
+    {
+        tracing::info!(%platform, game_id, game_patch = %game, client_patch = %client, "replay predates the current patch; abandoning clips");
+        journal.append(&ClipsAbandoned { platform, game_id, tries: job.tries, riot_id: Some(job.riot_id.clone()) })?;
+        return Ok(ClipOutcome::Skipped);
+    }
+
+    // Re-checked per job: recording kills the game process, so only drive a
+    // replay while the client sits idle. An unreachable client (League
+    // closed) ends the pass without burning a try.
+    match client_phase().await.as_deref() {
+        Some(phase) if phase.contains("None") || phase.contains("Lobby") => {}
+        _ => return Ok(ClipOutcome::ClientBusy),
+    }
+
+    if job.tries >= cli.clip_max_tries {
+        tracing::info!(%platform, game_id, riot_id = %job.riot_id, tries = job.tries, "giving up on clips");
+        journal.append(&ClipsAbandoned { platform, game_id, tries: job.tries, riot_id: Some(job.riot_id.clone()) })?;
+        return Ok(ClipOutcome::Skipped);
+    }
+
+    // Cheap availability probe before committing to a full replay load: a
+    // just-ended game's .rofl takes a couple minutes to verify.
+    if !replay_ready(game_id).await {
+        tracing::info!(%platform, game_id, "replay not yet available");
+        return Ok(ClipOutcome::NotReady);
+    }
+
+    journal.append(&ClipAttempt {
+        platform: platform.clone(),
+        game_id,
+        try_number: job.tries + 1,
+        riot_id: Some(job.riot_id.clone()),
+    })?;
+    tracing::info!(%platform, game_id, riot_id = %job.riot_id, try_number = job.tries + 1, "recording clips");
+    let status = tokio::process::Command::new("scripts/highlight.sh")
+        .arg(&dir)
+        .arg(&suffix)
+        .status()
+        .await
+        .context("running scripts/highlight.sh")?;
+    let (highlight, lowlight) = (dir.join(format!("highlight{suffix}.mp4")), dir.join(format!("lowlight{suffix}.mp4")));
+    if !status.success() || (!highlight.exists() && !lowlight.exists()) {
+        tracing::info!(%platform, game_id, riot_id = %job.riot_id, "clips not ready (will retry)");
+        return Ok(ClipOutcome::Skipped);
+    }
+
+    // The edit path appends `clips_attached` on success.
+    let overview = dir.join(format!("overview{suffix}.md"));
+    crate::post_from_archive(&post_cli(cli, &job.riot_id, &overview, &dir, /* edit */ true), &dir).await?;
+    tracing::info!(%platform, game_id, riot_id = %job.riot_id, "clips attached");
+    Ok(ClipOutcome::Recorded)
+}
+
+/// Whether the replay for `game_id` is downloaded and verified (metadata
+/// state `watch`): kick the download and poll briefly — seconds, not the
+/// minutes a blind replay load costs when the .rofl isn't there yet.
+async fn replay_ready(game_id: u64) -> bool {
+    let _ = lcu_post(&format!("/lol-replays/v1/rofls/{game_id}/download/graceful"), "{}").await;
+    for _ in 0..4 {
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        if let Some(body) = lcu_get(&format!("/lol-replays/v1/metadata/{game_id}")).await
+            && let Ok(meta) = serde_json::from_str::<serde_json::Value>(&body)
+            && meta.get("state").and_then(serde_json::Value::as_str) == Some("watch")
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// The client's replay patch as `major.minor` (`/lol-replays/v1/configuration`
@@ -305,9 +397,18 @@ async fn client_phase() -> Option<String> {
     lcu_get("/lol-gameflow/v1/gameflow-phase").await
 }
 
+/// POST one LCU endpoint; `None` when the client is down or the call fails.
+async fn lcu_post(path: &str, body: &'static str) -> Option<String> {
+    lcu_request(path, Some(body)).await
+}
+
 /// GET one LCU endpoint through the lockfile-published local port; `None`
 /// when the client is down or the request fails.
 async fn lcu_get(path: &str) -> Option<String> {
+    lcu_request(path, None).await
+}
+
+async fn lcu_request(path: &str, post_body: Option<&'static str>) -> Option<String> {
     let lockfile = std::fs::read_to_string("/Applications/League of Legends.app/Contents/LoL/lockfile").ok()?;
     let mut fields = lockfile.trim().split(':');
     let (port, password) = (fields.nth(2)?, fields.next()?);
@@ -316,20 +417,17 @@ async fn lcu_get(path: &str) -> Option<String> {
         .timeout(std::time::Duration::from_secs(5))
         .build()
         .ok()?;
-    client
-        .get(format!("https://127.0.0.1:{port}{path}"))
-        .basic_auth("riot", Some(password))
-        .send()
-        .await
-        .ok()?
-        .text()
-        .await
-        .ok()
+    let url = format!("https://127.0.0.1:{port}{path}");
+    let request = match post_body {
+        Some(body) => client.post(url).header("Content-Type", "application/json").body(body),
+        None => client.get(url),
+    };
+    request.basic_auth("riot", Some(password)).send().await.ok()?.text().await.ok()
 }
 
 /// The `Cli` a tick-driven post/edit runs with: `--from-archive <dir>
-/// --summary <dir>/overview.md --no-overview --track-lp [--edit]`.
-fn post_cli(cli: &Cli, riot_id: &str, dir: &Path, edit: bool) -> Cli {
+/// --summary <overview> --no-overview --track-lp [--edit]`.
+fn post_cli(cli: &Cli, riot_id: &str, overview: &Path, dir: &Path, edit: bool) -> Cli {
     Cli {
         riot_id: Some(riot_id.to_string()),
         region: None,
@@ -338,7 +436,7 @@ fn post_cli(cli: &Cli, riot_id: &str, dir: &Path, edit: bool) -> Cli {
         count: 1,
         queue: None,
         dump: None,
-        summary: Some(dir.join("overview.md")),
+        summary: Some(overview.to_path_buf()),
         summary_model: cli.summary_model.clone(),
         from_archive: Some(dir.to_path_buf()),
         charts: false,
@@ -449,13 +547,13 @@ pub fn import_legacy_state(cli: &Cli) -> Result<()> {
         let tries: u32 =
             std::fs::read_to_string(dir.join(".clips-tries")).ok().and_then(|t| t.trim().parse().ok()).unwrap_or(0);
         if tries > 0 {
-            journal.append(&ClipAttempt { platform: platform.clone(), game_id, try_number: tries })?;
+            journal.append(&ClipAttempt { platform: platform.clone(), game_id, try_number: tries, riot_id: None })?;
         }
         if dir.join(".clips-done").exists() {
             if has_clips {
-                journal.append(&ClipsAttached { platform: platform.clone(), game_id })?;
+                journal.append(&ClipsAttached { platform: platform.clone(), game_id, riot_id: None })?;
             } else {
-                journal.append(&ClipsAbandoned { platform: platform.clone(), game_id, tries })?;
+                journal.append(&ClipsAbandoned { platform: platform.clone(), game_id, tries, riot_id: None })?;
             }
         }
     }
@@ -498,14 +596,15 @@ pub fn abandon_clips(cli: &Cli) -> Result<()> {
     let projection = journal.fold()?;
     for match_id in &cli.abandon_clips {
         let (platform, game_id) = split_match_id(match_id)?;
-        match projection.clip_job(platform, game_id) {
-            Some(job) if job.done => tracing::info!(%match_id, "clip job already finished; skipping"),
-            job => {
-                let tries = job.map_or(0, |j| j.tries);
-                journal.append(&ClipsAbandoned { platform: platform.to_string(), game_id, tries })?;
-                tracing::info!(%match_id, "clip job abandoned");
-            }
+        let jobs = projection.clip_jobs(platform, game_id);
+        if !jobs.is_empty() && jobs.iter().all(|job| job.done) {
+            tracing::info!(%match_id, "clip jobs already finished; skipping");
+            continue;
         }
+        // riot_id: None = every perspective of the game.
+        let tries = jobs.iter().map(|job| job.tries).max().unwrap_or(0);
+        journal.append(&ClipsAbandoned { platform: platform.to_string(), game_id, tries, riot_id: None })?;
+        tracing::info!(%match_id, "clip jobs abandoned");
     }
     Ok(())
 }
@@ -573,8 +672,9 @@ fn read_queue_id(dir: &Path) -> Option<u32> {
     u32::try_from(value.get("info")?.get("queueId")?.as_u64()?).ok()
 }
 
-/// poll.sh's per-account dedup slug: every non-alphanumeric byte becomes `_`.
-fn slug(riot_id: &str) -> String {
+/// A riot id as a filename-safe slug: every non-alphanumeric byte becomes
+/// `_` (the same mapping the old shell markers used).
+pub fn slug(riot_id: &str) -> String {
     riot_id
         .chars()
         .map(|c| {

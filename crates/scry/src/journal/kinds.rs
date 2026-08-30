@@ -110,6 +110,10 @@ pub struct ClipAttempt {
     pub game_id: u64,
     /// 1-based attempt number; the projection keeps the max seen.
     pub try_number: u32,
+    /// The tracked player whose perspective this attempt records — clip jobs
+    /// are per (game, player) since tracked players share games. Trailing
+    /// optional: a legacy event (absent) applies to every job of the game.
+    pub riot_id: Option<String>,
 }
 
 /// Highlight/lowlight clips were recorded and attached to the post — the
@@ -119,6 +123,9 @@ pub struct ClipAttempt {
 pub struct ClipsAttached {
     pub platform: String,
     pub game_id: u64,
+    /// The perspective attached; a legacy event (absent) finishes every job
+    /// of the game.
+    pub riot_id: Option<String>,
 }
 
 /// Clip recording abandoned after exhausting the retry budget — the failed
@@ -130,4 +137,7 @@ pub struct ClipsAbandoned {
     pub game_id: u64,
     /// Attempts made before giving up.
     pub tries: u32,
+    /// The perspective abandoned; a legacy event (absent) — including the
+    /// --abandon-clips maintenance flag — finishes every job of the game.
+    pub riot_id: Option<String>,
 }

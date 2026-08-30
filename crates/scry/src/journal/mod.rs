@@ -134,11 +134,11 @@ impl Journal {
                 ClipAttempt::NAME => projection.apply_attempt(&decode::<ClipAttempt>(payload)?),
                 ClipsAttached::NAME => {
                     let e = decode::<ClipsAttached>(payload)?;
-                    projection.apply_terminal(&e.platform, e.game_id);
+                    projection.apply_terminal(&e.platform, e.game_id, e.riot_id.as_deref());
                 }
                 ClipsAbandoned::NAME => {
                     let e = decode::<ClipsAbandoned>(payload)?;
-                    projection.apply_terminal(&e.platform, e.game_id);
+                    projection.apply_terminal(&e.platform, e.game_id, e.riot_id.as_deref());
                 }
                 // Consumed by the pin pass above; audit-only here.
                 AccountResolved::NAME | AccountRenamed::NAME => {}
@@ -176,8 +176,9 @@ pub struct Projection {
     posted: std::collections::HashSet<(String, u64, String)>,
     /// Discord message id per posted game (last post wins).
     message_ids: HashMap<(String, u64), String>,
-    /// Clip job state per posted game.
-    clips: HashMap<(String, u64), ClipJob>,
+    /// Clip job state per (platform, game, identity) — tracked players share
+    /// games, and each poster gets their own perspective recorded.
+    clips: HashMap<(String, u64, String), ClipJob>,
     /// Newest posted game per (identity, queue_id) — the floor below which
     /// older window entries are history, not news.
     newest: HashMap<(String, u32), (String, u64)>,
@@ -205,16 +206,15 @@ impl Projection {
         if event.game_id > floor.1 {
             *floor = (event.platform.clone(), event.game_id);
         }
-        self.posted.insert((event.platform, key.1, ident));
+        self.posted.insert((event.platform, key.1, ident.clone()));
         if !event.message_id.is_empty() {
             self.message_ids.insert(key.clone(), event.message_id);
         }
         if let Some(rank) = event.rank {
             self.rank_lines.insert(key.clone(), rank);
         }
-        let job = self.clips.entry(key).or_default();
-        // A re-post moves the clip perspective (last poster wins) but never
-        // resurrects a finished job.
+        let job = self.clips.entry((key.0, key.1, ident)).or_default();
+        // Refresh the display name; a re-post never resurrects a finished job.
         if !job.done {
             job.riot_id = event.riot_id;
         }
@@ -225,12 +225,37 @@ impl Projection {
     }
 
     fn apply_attempt(&mut self, event: &ClipAttempt) {
-        let job = self.clips.entry((event.platform.clone(), event.game_id)).or_default();
-        job.tries = job.tries.max(event.try_number);
+        match &event.riot_id {
+            Some(riot_id) => {
+                let ident = self.ident(riot_id);
+                let job = self.clips.entry((event.platform.clone(), event.game_id, ident)).or_default();
+                job.tries = job.tries.max(event.try_number);
+            }
+            // Legacy / whole-game: every perspective of the game.
+            None => {
+                for ((platform, game_id, _), job) in &mut self.clips {
+                    if *platform == event.platform && *game_id == event.game_id {
+                        job.tries = job.tries.max(event.try_number);
+                    }
+                }
+            }
+        }
     }
 
-    fn apply_terminal(&mut self, platform: &str, game_id: u64) {
-        self.clips.entry((platform.to_string(), game_id)).or_default().done = true;
+    fn apply_terminal(&mut self, platform: &str, game_id: u64, riot_id: Option<&str>) {
+        match riot_id {
+            Some(riot_id) => {
+                let ident = self.ident(riot_id);
+                self.clips.entry((platform.to_string(), game_id, ident)).or_default().done = true;
+            }
+            None => {
+                for ((p, g, _), job) in &mut self.clips {
+                    if *p == platform && *g == game_id {
+                        job.done = true;
+                    }
+                }
+            }
+        }
     }
 
     /// Was this game already posted for this player? The name re-keys through
@@ -252,8 +277,11 @@ impl Projection {
             .clips
             .iter()
             .filter(|(_, job)| !job.done && !job.riot_id.is_empty())
-            .map(|((platform, game_id), job)| (platform.clone(), *game_id, job.clone()))
+            .map(|((platform, game_id, _), job)| (platform.clone(), *game_id, job.clone()))
             .collect();
+        jobs.sort_by(|a, b| {
+            std::cmp::Reverse((a.1, &a.2.riot_id)).cmp(&std::cmp::Reverse((b.1, &b.2.riot_id))).reverse()
+        });
         jobs.sort_by_key(|(_, game_id, _)| std::cmp::Reverse(*game_id));
         jobs
     }
@@ -274,9 +302,9 @@ impl Projection {
         self.pins.get(&riot_id.to_lowercase()).map(String::as_str)
     }
 
-    /// The clip job for one posted game, if any.
-    pub fn clip_job(&self, platform: &str, game_id: u64) -> Option<&ClipJob> {
-        self.clips.get(&(platform.to_string(), game_id))
+    /// Every clip job of one posted game (one per tracked perspective).
+    pub fn clip_jobs(&self, platform: &str, game_id: u64) -> Vec<&ClipJob> {
+        self.clips.iter().filter(|((p, g, _), _)| p == platform && *g == game_id).map(|(_, job)| job).collect()
     }
 
     /// The LP line rendered when this game posted, if any.
@@ -313,9 +341,9 @@ mod tests {
         let journal = Journal::open(&path).unwrap();
 
         journal.append(&posted("NA1", 100, "Moon#132", "m-100")).unwrap();
-        journal.append(&ClipAttempt { platform: "NA1".into(), game_id: 100, try_number: 1 }).unwrap();
+        journal.append(&ClipAttempt { platform: "NA1".into(), game_id: 100, try_number: 1, riot_id: None }).unwrap();
         journal.append(&posted("NA1", 101, "Himles#9267", "m-101")).unwrap();
-        journal.append(&ClipsAttached { platform: "NA1".into(), game_id: 100 }).unwrap();
+        journal.append(&ClipsAttached { platform: "NA1".into(), game_id: 100, riot_id: None }).unwrap();
         journal
             .append(&RankObserved {
                 puuid: "p-1".into(),
