@@ -28,7 +28,7 @@ enum Cmd {
         #[arg(long, default_value = "na1")]
         region: String,
         /// Queue ids to scan, comma-separated (or `all`).
-        #[arg(long, default_value = "420,440")]
+        #[arg(long, default_value = "420,440,710")]
         queues: String,
     },
     /// Remove a tracked account from the watch list.
