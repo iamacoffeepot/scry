@@ -107,14 +107,19 @@ fn parse_timeline(events_jsonl: &str, team_of: &[(i32, i32)]) -> Timeline {
                     .and_then(Value::as_array)
                     .map(|a| a.iter().filter_map(Value::as_i64).map(|n| n as i32).collect())
                     .unwrap_or_default();
+                let killer = ev.get("killerId").and_then(Value::as_i64).unwrap_or(0);
+                let (fought_back, dealt_champs, killer_share) = ledger_sums(&ev, killer);
                 kills.push(KillEv {
                     t: ev.get("timestamp").and_then(Value::as_i64).unwrap_or(0),
-                    killer: ev.get("killerId").and_then(Value::as_i64).unwrap_or(0) as i32,
+                    killer: killer as i32,
                     victim: ev.get("victimId").and_then(Value::as_i64).unwrap_or(0) as i32,
-                    killer_team: team_of_participant(team_of, ev.get("killerId").and_then(Value::as_i64).unwrap_or(0)),
+                    killer_team: team_of_participant(team_of, killer),
                     assists,
                     bounty: ev.get("bounty").and_then(Value::as_i64).unwrap_or(0),
                     shutdown: ev.get("shutdownBounty").and_then(Value::as_i64).unwrap_or(0),
+                    fought_back,
+                    dealt_champs,
+                    killer_share,
                     x: ev.pointer("/position/x").and_then(Value::as_f64).unwrap_or(0.0),
                     y: ev.pointer("/position/y").and_then(Value::as_f64).unwrap_or(0.0),
                 });
@@ -174,6 +179,52 @@ fn parse_timeline(events_jsonl: &str, team_of: &[(i32, i32)]) -> Timeline {
     specials.sort_by_key(|s| s.t);
     objectives.sort_by_key(|o| o.t);
     Timeline { kills, specials, objectives, first_blood }
+}
+
+/// Sum a kill's damage ledger into the three duel signals: damage the victim
+/// dealt to their killer, damage the victim dealt to champions overall, and
+/// the killer's share of everything the victim received. Ledger semantics
+/// (verified across the archive): in `victimDamageReceived`, `participantId`
+/// is the damage *dealer*; in `victimDamageDealt` it is the *recipient* —
+/// never the victim themselves. `type` is the non-champion party's class
+/// (`OTHER` = champion-vs-champion).
+fn ledger_sums(ev: &Value, killer: i64) -> (i64, i64, f64) {
+    let total = |x: &Value| {
+        ["physicalDamage", "magicDamage", "trueDamage"]
+            .iter()
+            .filter_map(|f| x.get(*f).and_then(Value::as_i64))
+            .sum::<i64>()
+    };
+    let entries =
+        |field: &str| ev.get(field).and_then(Value::as_array).map(|a| a.as_slice()).unwrap_or_default().iter();
+
+    let fought_back = entries("victimDamageDealt")
+        .filter(|x| x.get("participantId").and_then(Value::as_i64) == Some(killer))
+        .map(total)
+        .sum();
+    let dealt_champs = entries("victimDamageDealt")
+        .filter(|x| x.get("type").and_then(Value::as_str) == Some("OTHER"))
+        .map(total)
+        .sum();
+    let received_all: i64 = entries("victimDamageReceived").map(total).sum();
+    let received_killer: i64 = entries("victimDamageReceived")
+        .filter(|x| x.get("participantId").and_then(Value::as_i64) == Some(killer))
+        .map(total)
+        .sum();
+    let killer_share = if received_all > 0 {
+        received_killer as f64 / received_all as f64
+    } else {
+        0.0
+    };
+    (fought_back, dealt_champs, killer_share)
+}
+
+/// Rough champion max-HP at game time `t_ms` — the yardstick that turns raw
+/// ledger damage into "how close was this fight". Calibrated against the
+/// archived ledger distribution: the p90 of victim-fought-back damage sits
+/// near 0.6× this curve and the p97 near 1.0× in every game-time bucket.
+fn expected_hp(t_ms: i64) -> i64 {
+    550 + 58 * (t_ms / 60_000)
 }
 
 // --- fight -> objective conversion ------------------------------------------
@@ -396,6 +447,20 @@ fn highlight_candidates(tl: &Timeline, pid: i32, pteam: i32, ctx: &ScoreContext)
         // Solo kills read better on video than shared cleanup.
         let solo_kills = pkills.iter().filter(|k| k.assists.is_empty()).count() as i64;
         score += solo_kills * 3;
+        // Duel intensity from the kill ledger: how much damage the victim
+        // pumped back into the player before dying, against the HP yardstick.
+        // A kill where the victim nearly killed the player back is a clutch
+        // duel; a kill where they dealt nothing is a cleanup.
+        let closeness_pct = pkills.iter().map(|k| k.fought_back * 100 / expected_hp(k.t).max(1)).max().unwrap_or(0);
+        if closeness_pct >= 90 {
+            score += 6;
+        } else if closeness_pct >= 60 {
+            score += 4;
+        }
+        // Kills credited with assists where the ledger says the player did
+        // nearly all the damage anyway — carried, not cleanup.
+        let carried = pkills.iter().filter(|k| !k.assists.is_empty() && k.killer_share >= 0.85).count() as i64;
+        score += (carried * 2).min(4);
         // Outnumbered fights are the outplays worth watching; headcount from
         // the fight's own kill events is the grounded proxy for the odds.
         let (allies, enemies) = fight_headcount(fight, pteam);
@@ -473,13 +538,25 @@ fn highlight_candidates(tl: &Timeline, pid: i32, pteam: i32, ctx: &ScoreContext)
             1 => ", incl. a solo kill".to_string(),
             n => format!(", incl. {n} solo kills"),
         };
+        let duel_s = if closeness_pct >= 90 {
+            ", won a near-lethal duel"
+        } else if closeness_pct >= 60 {
+            ", won a hard-fought duel"
+        } else {
+            ""
+        };
+        let carry_s = if carried > 0 {
+            ", did nearly all the damage"
+        } else {
+            ""
+        };
         let odds_s = if enemies > allies {
             format!(", outnumbered {allies}v{enemies}")
         } else {
             String::new()
         };
         let summary = format!(
-            "you went {}/{}/{} in a fight{multi_s}{solo_s}{odds_s}{fb_s}{surv_s}{obj_s}{closing_s} (+{gold}g)",
+            "you went {}/{}/{} in a fight{multi_s}{solo_s}{duel_s}{carry_s}{odds_s}{fb_s}{surv_s}{obj_s}{closing_s} (+{gold}g)",
             pkills.len(),
             pdeaths,
             passists,
@@ -565,6 +642,17 @@ fn lowlight_candidates(tl: &Timeline, pid: i32, pteam: i32, game: &Match, ctx: &
         if repeated {
             score += 2;
         }
+        // The kill ledger separates the flavors of dying: deleted while
+        // barely dealing a scratch is the embarrassing lowlight; dealing more
+        // than an HP bar's worth first was a real fight, merely lost.
+        let melted = !executed && death.dealt_champs * 100 < expected_hp(death.t) * 8;
+        if melted {
+            score += 3;
+        }
+        let swinging = death.dealt_champs * 10 >= expected_hp(death.t) * 12;
+        if swinging {
+            score -= 2;
+        }
         // A late throw costs more than an early one; a death in the closing
         // window may have been the game.
         score += death.t / 600_000;
@@ -587,13 +675,20 @@ fn lowlight_candidates(tl: &Timeline, pid: i32, pteam: i32, game: &Match, ctx: &
         } else {
             ""
         };
+        let fight_s = if melted {
+            ", melted without a fight"
+        } else if swinging {
+            ", went down swinging"
+        } else {
+            ""
+        };
         let gold_s = if death.shutdown > 0 {
             format!(", gave up a {}g shutdown", death.shutdown)
         } else {
             String::new()
         };
         let obj_s = punished.map(|o| format!("; {} followed", o.label)).unwrap_or_default();
-        let summary = format!("{opener}{free_s}{rep_s}{gold_s}{obj_s}");
+        let summary = format!("{opener}{free_s}{fight_s}{rep_s}{gold_s}{obj_s}");
         // A death is a single instant: lead-in, the death, a short tail.
         let seek_s = (death.t / 1000 - CLIP_LEAD_S).max(0);
         let dur_s = CLIP_LEAD_S + 9;
@@ -756,6 +851,13 @@ struct KillEv {
     bounty: i64,
     /// Extra shutdown gold (the victim was on a streak/bounty).
     shutdown: i64,
+    /// Damage the victim dealt to their killer before dying — the duel signal.
+    fought_back: i64,
+    /// Damage the victim dealt to champions overall before dying.
+    dealt_champs: i64,
+    /// The killer's share of all damage the victim received (0.0 when the
+    /// event carries no ledger).
+    killer_share: f64,
     x: f64,
     y: f64,
 }
@@ -1048,6 +1150,35 @@ mod tests {
         let events = std::fs::read_to_string(dir.join("timeline-events.jsonl")).ok()?;
         let game: Match = serde_json::from_str(&match_json).ok()?;
         Some((game, events))
+    }
+
+    /// The ledger's `participantId` is asymmetric — dealer in
+    /// `victimDamageReceived`, recipient in `victimDamageDealt` — so a naive
+    /// "participantId == killer" filter on the wrong array silently inverts
+    /// every duel signal. Pin the semantics with one synthetic kill: killer 3
+    /// took 500 back from the victim (who also poked participant 4 for 200
+    /// and a tower for 900), and dealt 800 of the victim's 1000 received.
+    #[test]
+    fn ledger_sums_respect_the_participant_id_asymmetry() {
+        let ev: Value = serde_json::from_str(
+            r#"{
+                "type": "CHAMPION_KILL", "timestamp": 600000, "killerId": 3, "victimId": 7,
+                "victimDamageDealt": [
+                    {"participantId": 3, "type": "OTHER", "physicalDamage": 500, "magicDamage": 0, "trueDamage": 0},
+                    {"participantId": 4, "type": "OTHER", "physicalDamage": 0, "magicDamage": 200, "trueDamage": 0},
+                    {"participantId": 0, "type": "TOWER", "physicalDamage": 900, "magicDamage": 0, "trueDamage": 0}
+                ],
+                "victimDamageReceived": [
+                    {"participantId": 3, "type": "OTHER", "physicalDamage": 800, "magicDamage": 0, "trueDamage": 0},
+                    {"participantId": 4, "type": "OTHER", "physicalDamage": 0, "magicDamage": 200, "trueDamage": 0}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let (fought_back, dealt_champs, killer_share) = ledger_sums(&ev, 3);
+        assert_eq!(fought_back, 500, "damage the victim dealt to the killer only");
+        assert_eq!(dealt_champs, 700, "champion damage only — the tower poke stays out");
+        assert!((killer_share - 0.8).abs() < 1e-9, "killer dealt 800 of the 1000 received");
     }
 
     /// The headline: Red side (Moon's team) won multiple early fights but

@@ -71,6 +71,18 @@ join: `CHAMPION_KILL`, `CHAMPION_SPECIAL_KILL`, `ELITE_MONSTER_KILL`,
 `BUILDING_KILL`, `TURRET_PLATE_DESTROYED`. Everything else (wards, items, levels,
 skills) is positionless.
 
+**Kill damage ledger** (`CHAMPION_KILL.victimDamageDealt` / `victimDamageReceived`):
+every kill carries per-instance damage exchanges (spell name, phys/magic/true
+split) between the victim and each other party. Semantics, verified across the
+archive (~3k kills): `participantId` is the damage *dealer* in `Received` and
+the *recipient* in `Dealt` — never the victim; `name` is the dealer's champion;
+`type` classes the non-champion party (`OTHER` = champion). This is the duel
+signal the scorer uses: how hard the victim fought back (against a game-time HP
+yardstick, `550 + 58·minute` — the archived p97 of fight-back damage tracks
+1.0× that curve), and the killer's true damage share behind the assist list.
+There is still no dodge/skillshot data in Tier 1 — "nearly killed the killer
+back" is the honest proxy for an outplay.
+
 ### Tier 2 — `.rofl` replay files (future, heavier)
 
 The encrypted replay file contains the **full high-frequency positional stream,
