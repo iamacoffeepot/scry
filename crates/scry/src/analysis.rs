@@ -386,6 +386,12 @@ pub fn clip_candidates(game: &Match, events_jsonl: &str, puuid: &str) -> (Vec<Ca
         // events, so this match-detail aggregate is the playmaker signal.
         cc_seconds: i64::from(player.time_ccing_others),
         end_ms: game.info.game_duration * 1000,
+        enemy_jungler: game
+            .info
+            .participants
+            .iter()
+            .find(|p| p.team_id != player.team_id && p.team_position == "JUNGLE")
+            .map(|p| p.participant_id),
     };
     let mut highlights = highlight_candidates(&tl, pid, pteam, &ctx);
     highlights.extend(objective_candidates(&tl, pid, pteam, &ctx));
@@ -401,6 +407,37 @@ struct ScoreContext {
     cc_seconds: i64,
     /// Game end in timeline milliseconds (the closing-fight bonus window).
     end_ms: i64,
+    /// The enemy jungler's participant id — the smite carrier whose death
+    /// opens dragons and Baron; the canonical priority-pick target.
+    enemy_jungler: Option<i32>,
+}
+
+/// A shutdown at or above this much gold marks the victim as a fed carry —
+/// the other flavor of priority target a pick can cash into an objective.
+const PRIORITY_SHUTDOWN_GOLD: i64 = 300;
+
+/// The player's priority pick in a fight, if any: a kill on the enemy jungler
+/// or a fed bounty carry that the team cashed into a major objective within
+/// the conversion window. Returns whether the victim was the jungler, plus
+/// the objective's label. Team-level on purpose — the pick opened the take
+/// whether or not the player walked to the pit (presence there is the
+/// separate participation bonus).
+fn priority_pick(
+    pkills: &[&KillEv],
+    objectives: &[Objective],
+    pteam: i32,
+    enemy_jungler: Option<i32>,
+) -> Option<(bool, String)> {
+    pkills.iter().find_map(|k| {
+        let jungler = enemy_jungler == Some(k.victim);
+        if !jungler && k.shutdown < PRIORITY_SHUTDOWN_GOLD {
+            return None;
+        }
+        objectives
+            .iter()
+            .find(|o| o.team == pteam && o.monster.is_major() && o.t >= k.t && o.t <= k.t + CONVERSION_WINDOW_MS)
+            .map(|o| (jungler, o.label.clone()))
+    })
 }
 
 /// The player's best plays: fights they were central to, scored on kills/assists,
@@ -461,6 +498,12 @@ fn highlight_candidates(tl: &Timeline, pid: i32, pteam: i32, ctx: &ScoreContext)
         // nearly all the damage anyway — carried, not cleanup.
         let carried = pkills.iter().filter(|k| !k.assists.is_empty() && k.killer_share >= 0.85).count() as i64;
         score += (carried * 2).min(4);
+        // A pick on a priority target that the team turned into a major
+        // objective is the play that decided the map.
+        let pick = priority_pick(&pkills, &tl.objectives, pteam, ctx.enemy_jungler);
+        if pick.is_some() {
+            score += 5;
+        }
         // Outnumbered fights are the outplays worth watching; headcount from
         // the fight's own kill events is the grounded proxy for the odds.
         let (allies, enemies) = fight_headcount(fight, pteam);
@@ -550,13 +593,30 @@ fn highlight_candidates(tl: &Timeline, pid: i32, pteam: i32, ctx: &ScoreContext)
         } else {
             ""
         };
+        let pick_s = match &pick {
+            // When the player was also at the take, obj_s already names what
+            // followed — don't say it twice.
+            Some((jungler, label)) => {
+                let who = if *jungler {
+                    "their jungler"
+                } else {
+                    "a bounty carry"
+                };
+                if objective.is_some() {
+                    format!(", picked off {who}")
+                } else {
+                    format!(", picked off {who} — the team cashed it into {label}")
+                }
+            }
+            None => String::new(),
+        };
         let odds_s = if enemies > allies {
             format!(", outnumbered {allies}v{enemies}")
         } else {
             String::new()
         };
         let summary = format!(
-            "you went {}/{}/{} in a fight{multi_s}{solo_s}{duel_s}{carry_s}{odds_s}{fb_s}{surv_s}{obj_s}{closing_s} (+{gold}g)",
+            "you went {}/{}/{} in a fight{multi_s}{solo_s}{duel_s}{carry_s}{pick_s}{odds_s}{fb_s}{surv_s}{obj_s}{closing_s} (+{gold}g)",
             pkills.len(),
             pdeaths,
             passists,
@@ -1179,6 +1239,63 @@ mod tests {
         assert_eq!(fought_back, 500, "damage the victim dealt to the killer only");
         assert_eq!(dealt_champs, 700, "champion damage only — the tower poke stays out");
         assert!((killer_share - 0.8).abs() < 1e-9, "killer dealt 800 of the 1000 received");
+    }
+
+    /// The priority-pick join has four independent gates (priority victim,
+    /// converting team, major-only, forward window) — any one silently
+    /// inverted would score routine kills or drop real picks.
+    #[test]
+    fn priority_pick_gates() {
+        let kill = |victim: i32, shutdown: i64| KillEv {
+            t: 600_000,
+            killer: 1,
+            victim,
+            killer_team: 100,
+            assists: Vec::new(),
+            bounty: 300,
+            shutdown,
+            fought_back: 0,
+            dealt_champs: 0,
+            killer_share: 0.0,
+            x: 0.0,
+            y: 0.0,
+        };
+        let objective = |t: i64, team: i32, monster: Monster| Objective {
+            t,
+            team,
+            monster,
+            killer: 0,
+            elder: false,
+            label: "Baron".to_string(),
+            participants: Vec::new(),
+        };
+        let jungler_kill = kill(6, 0);
+        let carry_kill = kill(7, 500);
+        let plain_kill = kill(7, 0);
+
+        let baron_after = [objective(650_000, 100, Monster::Baron)];
+        assert_eq!(
+            priority_pick(&[&jungler_kill], &baron_after, 100, Some(6)),
+            Some((true, "Baron".to_string())),
+            "jungler pick cashed into Baron"
+        );
+        assert_eq!(
+            priority_pick(&[&carry_kill], &baron_after, 100, Some(6)),
+            Some((false, "Baron".to_string())),
+            "shutdown carry counts as priority too"
+        );
+        assert_eq!(priority_pick(&[&plain_kill], &baron_after, 100, Some(6)), None, "an ordinary kill is not a pick");
+
+        let enemy_baron = [objective(650_000, 200, Monster::Baron)];
+        assert_eq!(priority_pick(&[&jungler_kill], &enemy_baron, 100, Some(6)), None, "the ENEMY's take earns nothing");
+        let baron_before = [objective(550_000, 100, Monster::Baron)];
+        assert_eq!(priority_pick(&[&jungler_kill], &baron_before, 100, Some(6)), None, "the take must FOLLOW the kill");
+        let tower_after = [objective(650_000, 100, Monster::Building)];
+        assert_eq!(
+            priority_pick(&[&jungler_kill], &tower_after, 100, Some(6)),
+            None,
+            "majors only — a tower is routine"
+        );
     }
 
     /// The headline: Red side (Moon's team) won multiple early fights but
