@@ -438,7 +438,7 @@ const PRIORITY_SHUTDOWN_GOLD: i64 = 300;
 const PRIORITY_THREAT_BAR: i64 = 5;
 
 /// A qualifying priority pick: what the victim was worth, whether their team
-/// answered, and the objective the pick was cashed into.
+/// answered, and the objective the pick was cashed into, if any.
 struct PriorityPick {
     /// Role weight + form, already at or above [`PRIORITY_THREAT_BAR`].
     threat: i64,
@@ -446,17 +446,37 @@ struct PriorityPick {
     caught_out: bool,
     /// Caption noun for the victim, e.g. "fed ADC".
     who: String,
-    /// The objective the team cashed the pick into.
-    label: String,
+    /// The major objective the team cashed the pick into, when one followed.
+    converted: Option<String>,
+}
+
+impl PriorityPick {
+    /// The catch is the play: the victim's worth leads, the clean catch is
+    /// the flashy part, and a cash-out is a bonus rather than a gate.
+    fn value(&self) -> i64 {
+        (self.threat
+            + if self.caught_out {
+                3
+            } else {
+                0
+            }
+            + if self.converted.is_some() {
+                2
+            } else {
+                0
+            })
+        .min(12)
+    }
 }
 
 /// The player's best priority pick in a fight, if any: a kill whose victim
 /// mattered — by role (the chess-piece weight) and by form (their running
 /// net scoreline at that moment, with a live shutdown bounty vouching for a
-/// gold lead the scoreline understates) — that the team cashed into a major
-/// objective within the conversion window. Team-level on purpose: the pick
-/// opened the take whether or not the player walked to the pit (presence
-/// there is the separate participation bonus).
+/// gold lead the scoreline understates). Catching the player who was winning
+/// the enemy their game is the highlight in itself; a major objective inside
+/// the conversion window is a cash-out bonus, not a requirement. Team-level
+/// on purpose: the pick opens the map whether or not the player walked to
+/// the pit (presence there is the separate participation bonus).
 fn priority_pick(pkills: &[&KillEv], tl: &Timeline, pteam: i32, ctx: &ScoreContext) -> Option<PriorityPick> {
     pkills
         .iter()
@@ -479,10 +499,11 @@ fn priority_pick(pkills: &[&KillEv], tl: &Timeline, pteam: i32, ctx: &ScoreConte
             if role + form < PRIORITY_THREAT_BAR {
                 return None;
             }
-            let objective = tl
+            let converted = tl
                 .objectives
                 .iter()
-                .find(|o| o.team == pteam && o.monster.is_major() && o.t >= k.t && o.t <= k.t + CONVERSION_WINDOW_MS)?;
+                .find(|o| o.team == pteam && o.monster.is_major() && o.t >= k.t && o.t <= k.t + CONVERSION_WINDOW_MS)
+                .map(|o| o.label.clone());
             let caught_out = !tl.kills.iter().any(|a| {
                 a.killer_team == other_team(pteam as i64)
                     && a.t >= k.t - TRADE_BEFORE_MS
@@ -494,9 +515,9 @@ fn priority_pick(pkills: &[&KillEv], tl: &Timeline, pteam: i32, ctx: &ScoreConte
             } else {
                 label.to_string()
             };
-            Some(PriorityPick { threat: role + form, caught_out, who, label: objective.label.clone() })
+            Some(PriorityPick { threat: role + form, caught_out, who, converted })
         })
-        .max_by_key(|p| p.threat)
+        .max_by_key(PriorityPick::value)
 }
 
 /// The player's best plays: fights they were central to, scored on kills/assists,
@@ -557,19 +578,13 @@ fn highlight_candidates(tl: &Timeline, pid: i32, pteam: i32, ctx: &ScoreContext)
         // nearly all the damage anyway — carried, not cleanup.
         let carried = pkills.iter().filter(|k| !k.assists.is_empty() && k.killer_share >= 0.85).count() as i64;
         score += (carried * 2).min(4);
-        // A pick on a priority target that the team turned into a major
-        // objective is the play that decided the map — worth more the more
-        // the victim was worth, and more again when they were caught out
-        // clean rather than felled in a brawl.
+        // A pick on a priority target is the outplay that decided the map —
+        // worth more the more the victim was worth, more again when caught
+        // out clean rather than felled in a brawl, and a little more when
+        // the team cashed it into a major objective.
         let pick = priority_pick(&pkills, tl, pteam, ctx);
         if let Some(p) = &pick {
-            score += (p.threat
-                + if p.caught_out {
-                    2
-                } else {
-                    0
-                })
-            .min(9);
+            score += p.value();
         }
         // Outnumbered fights are the outplays worth watching; headcount from
         // the fight's own kill events is the grounded proxy for the odds.
@@ -669,10 +684,9 @@ fn highlight_candidates(tl: &Timeline, pid: i32, pteam: i32, ctx: &ScoreContext)
                 } else {
                     format!(", picked off their {}", p.who)
                 };
-                if objective.is_some() {
-                    opener
-                } else {
-                    format!("{opener} — the team cashed it into {}", p.label)
+                match &p.converted {
+                    Some(label) if objective.is_none() => format!("{opener} — the team cashed it into {label}"),
+                    _ => opener,
                 }
             }
             None => String::new(),
@@ -1353,8 +1367,9 @@ mod tests {
         };
         let pick = |pick_kill: &KillEv, history: Vec<KillEv>, objectives: Vec<Objective>| {
             let tl = timeline(history, objectives);
-            priority_pick(&[pick_kill], &tl, 100, &ctx).map(|p| (p.threat, p.caught_out, p.who))
+            priority_pick(&[pick_kill], &tl, 100, &ctx).map(|p| (p.threat, p.caught_out, p.who, p.converted))
         };
+        let cashed = Some("Baron".to_string());
         let baron_after = objective(650_000, 100, Monster::Baron);
 
         // Threat bar: a 1-kill ADC clears it (4+1), a scoreless ADC and a
@@ -1363,7 +1378,7 @@ mod tests {
         let one_prior = vec![kill(300_000, 6, 200, 2, 0)];
         assert_eq!(
             pick(&adc_kill, one_prior, vec![baron_after.clone()]),
-            Some((5, true, "ADC".to_string())),
+            Some((5, true, "ADC".to_string(), cashed.clone())),
             "a 1-0 ADC is the queen — and nobody answered, so caught out"
         );
         assert_eq!(pick(&adc_kill, Vec::new(), vec![baron_after.clone()]), None, "a 0-0 ADC is not yet a threat");
@@ -1372,14 +1387,14 @@ mod tests {
         let two_prior = vec![kill(200_000, 7, 200, 2, 0), kill(300_000, 7, 200, 3, 0)];
         assert_eq!(
             pick(&jungler_kill, two_prior.clone(), vec![baron_after.clone()]),
-            Some((5, true, "jungler".to_string())),
+            Some((5, true, "jungler".to_string(), cashed.clone())),
             "a 2-0 jungler clears the bar"
         );
         // Shutdown vouches for form the scoreline doesn't show yet.
         let shutdown_kill = kill(600_000, 1, 100, 7, 500);
         assert_eq!(
             pick(&shutdown_kill, Vec::new(), vec![baron_after.clone()]),
-            Some((5, true, "fed jungler".to_string())),
+            Some((5, true, "fed jungler".to_string(), cashed.clone())),
             "a 500g shutdown vouches for the carry"
         );
         // A support never adds up to priority on role alone.
@@ -1398,25 +1413,27 @@ mod tests {
         answered_history.push(answer);
         assert_eq!(
             pick(&jungler_kill, answered_history, vec![baron_after.clone()]),
-            Some((5, false, "jungler".to_string())),
+            Some((5, false, "jungler".to_string(), cashed.clone())),
             "an answered kill was a brawl, not a catch"
         );
 
-        // The original conversion gates still hold.
+        // Conversion is a bonus, not a gate: the catch still scores when no
+        // qualifying take follows — the ENEMY's take, an earlier take, and a
+        // tower all read as uncashed rather than disqualifying.
         assert_eq!(
             pick(&jungler_kill, two_prior.clone(), vec![objective(650_000, 200, Monster::Baron)]),
-            None,
-            "the ENEMY's take earns nothing"
+            Some((5, true, "jungler".to_string(), None)),
+            "the ENEMY's take is no cash-out, but the catch stands"
         );
         assert_eq!(
             pick(&jungler_kill, two_prior.clone(), vec![objective(550_000, 100, Monster::Baron)]),
-            None,
-            "the take must FOLLOW the kill"
+            Some((5, true, "jungler".to_string(), None)),
+            "a take BEFORE the kill is no cash-out"
         );
         assert_eq!(
             pick(&jungler_kill, two_prior, vec![objective(650_000, 100, Monster::Building)]),
-            None,
-            "majors only — a tower is routine"
+            Some((5, true, "jungler".to_string(), None)),
+            "majors only — a tower is no cash-out"
         );
     }
 
