@@ -108,17 +108,17 @@ impl Journal {
             match kind.as_str() {
                 AccountResolved::NAME => {
                     let e = decode::<AccountResolved>(payload)?;
-                    projection.pins.insert(e.riot_id.to_lowercase(), e.puuid);
+                    projection.pin(&e.riot_id, e.puuid);
                 }
                 GamePosted::NAME => {
                     let e = decode::<GamePosted>(payload)?;
                     if let Some(puuid) = e.puuid {
-                        projection.pins.insert(e.riot_id.to_lowercase(), puuid);
+                        projection.pin(&e.riot_id, puuid);
                     }
                 }
                 PicksAssigned::NAME => {
                     let e = decode::<PicksAssigned>(payload)?;
-                    projection.pins.insert(e.riot_id.to_lowercase(), e.puuid);
+                    projection.pin(&e.riot_id, e.puuid);
                 }
                 _ => {}
             }
@@ -142,7 +142,8 @@ impl Journal {
                 }
                 PicksAssigned::NAME => {
                     let e = decode::<PicksAssigned>(payload)?;
-                    projection.picks.insert((e.platform.clone(), e.game_id, e.puuid.clone()), e);
+                    let ident = projection.canonical(&e.puuid);
+                    projection.picks.insert((e.platform.clone(), e.game_id, ident), e);
                 }
                 // Consumed by the pin pass above; audit-only here.
                 AccountResolved::NAME | AccountRenamed::NAME => {}
@@ -187,9 +188,14 @@ pub struct Projection {
     /// Newest posted game per (identity, queue_id) — the floor below which
     /// older window entries are history, not news.
     newest: HashMap<(String, u32), (String, u64)>,
-    /// Name (lowercase) → permanent PUUID pins; the identity every name-keyed
+    /// Name (lowercase) → latest PUUID pins; the identity every name-keyed
     /// query re-keys through, so a rename never orphans state.
     pins: HashMap<String, String>,
+    /// PUUID → the older PUUID it succeeded. Riot encrypts PUUIDs per API
+    /// key, so a key swap hands every account a fresh PUUID; when a name
+    /// re-pins to a different one, the new era joins the old identity here
+    /// and every identity-keyed lookup resolves through the chain.
+    canon: HashMap<String, String>,
     /// Last observed ladder value per (puuid, queue_id).
     ranks: HashMap<(String, u32), i32>,
     /// Post-time LP line per (game, identity).
@@ -200,15 +206,45 @@ pub struct Projection {
 }
 
 impl Projection {
-    /// The permanent identity a display name resolves to: its PUUID pin, or
-    /// the lowercased name itself when nothing has pinned it yet.
+    /// Record a name → PUUID pin, unioning PUUID eras: when the name already
+    /// pointed at a different identity, the new PUUID's root joins the old
+    /// one, so a key swap (which re-encrypts every PUUID) never forks a
+    /// player's history. Each root gains at most one outgoing edge and only
+    /// toward a distinct current root, so the chains stay acyclic.
+    fn pin(&mut self, riot_id: &str, puuid: String) {
+        let new_root = self.canonical(&puuid);
+        if let Some(prev) = self.pins.get(&riot_id.to_lowercase()) {
+            let prev_root = self.canonical(prev);
+            if prev_root != new_root {
+                self.canon.insert(new_root, prev_root);
+            }
+        }
+        self.pins.insert(riot_id.to_lowercase(), puuid);
+    }
+
+    /// The oldest PUUID in this PUUID's era chain — the one identity every
+    /// projection map keys by. Budgeted walk; the chain is one hop per key
+    /// swap in practice.
+    fn canonical(&self, puuid: &str) -> String {
+        let mut current = puuid;
+        for _ in 0..64 {
+            match self.canon.get(current) {
+                Some(older) => current = older,
+                None => break,
+            }
+        }
+        current.to_string()
+    }
+
+    /// The permanent identity a display name resolves to: its PUUID pin's
+    /// era root, or the lowercased name itself when nothing has pinned it.
     fn ident(&self, riot_id: &str) -> String {
         let lower = riot_id.to_lowercase();
-        self.pins.get(&lower).cloned().unwrap_or(lower)
+        self.pins.get(&lower).map(|p| self.canonical(p)).unwrap_or(lower)
     }
 
     fn apply_posted(&mut self, event: GamePosted) {
-        let ident = event.puuid.clone().unwrap_or_else(|| self.ident(&event.riot_id));
+        let ident = event.puuid.as_deref().map(|p| self.canonical(p)).unwrap_or_else(|| self.ident(&event.riot_id));
         let key = (event.platform.clone(), event.game_id);
         let floor = self.newest.entry((ident.clone(), event.queue_id)).or_insert_with(|| (event.platform.clone(), 0));
         if event.game_id > floor.1 {
@@ -230,7 +266,7 @@ impl Projection {
     }
 
     fn apply_rank(&mut self, event: RankObserved) {
-        self.ranks.insert((event.puuid, event.queue_id), event.ladder_value);
+        self.ranks.insert((self.canonical(&event.puuid), event.queue_id), event.ladder_value);
     }
 
     fn apply_attempt(&mut self, event: &ClipAttempt) {
@@ -327,8 +363,9 @@ impl Projection {
     }
 
     /// The previous ladder value for (puuid, queue), the LP-delta baseline.
+    /// Resolves through the era chain so a key swap doesn't null the delta.
     pub fn previous_ladder(&self, puuid: &str, queue_id: u32) -> Option<i32> {
-        self.ranks.get(&(puuid.to_string(), queue_id)).copied()
+        self.ranks.get(&(self.canonical(puuid), queue_id)).copied()
     }
 }
 
@@ -414,6 +451,24 @@ mod tests {
         let renamed = journal2.fold().unwrap();
         assert!(renamed.is_posted("NA1", 100, "Moonlight#NEW"), "rename keeps dedup");
         assert_eq!(renamed.newest_posted("Moonlight#NEW", Some(420)), Some(100), "rename keeps the floor");
+
+        // Key swap: Riot encrypts PUUIDs per API key, so a new key hands the
+        // same name a different PUUID. The re-pin unions the eras — dedup,
+        // floors, picks, and the LP baseline all survive under either PUUID.
+        journal2.append(&AccountResolved { riot_id: "Himles#9267".into(), puuid: "p-him-rekeyed".into() }).unwrap();
+        journal2.append(&AccountResolved { riot_id: "Moonlight#NEW".into(), puuid: "p-moon-rekeyed".into() }).unwrap();
+        let swapped = journal2.fold().unwrap();
+        assert!(swapped.is_posted("NA1", 100, "Moonlight#NEW"), "key swap keeps dedup");
+        assert_eq!(swapped.newest_posted("Moonlight#NEW", Some(420)), Some(100), "key swap keeps the floor");
+        assert!(swapped.picks("NA1", 101, "Himles#9267").is_some(), "key swap keeps picks");
+        assert_eq!(swapped.previous_ladder("p-1", 420), Some(1355), "old-era ladder key still resolves");
+
+        // A rank observed under the NEW puuid lands on the same identity: the
+        // old-era baseline is what the next delta reads.
+        journal2.append(&AccountResolved { riot_id: "OldMoon#132".into(), puuid: "p-1".into() }).unwrap();
+        journal2.append(&AccountResolved { riot_id: "OldMoon#132".into(), puuid: "p-1-rekeyed".into() }).unwrap();
+        let bridged = journal2.fold().unwrap();
+        assert_eq!(bridged.previous_ladder("p-1-rekeyed", 420), Some(1355), "LP delta bridges the key swap");
 
         std::fs::remove_dir_all(&dir).ok();
     }
