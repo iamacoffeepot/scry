@@ -52,6 +52,13 @@ case "$phase" in
     echo "live game in progress ($phase) — skipping clip recording"; exit 0;;
 esac
 
+# The game process needs an awake display to initialize its renderer — on a
+# sleeping screen it dies at boot with "Failed querying system monitors" and
+# the replay API never comes up (burned a night of clip retries, 09-03). Wake
+# the display and hold it awake for the whole recording pass; the subshell
+# exits with the script.
+caffeinate -u -d -w $$ &
+
 # --- load THIS game's replay (a stale one may be up) ------------------------
 # The .rofl download verifies asynchronously (metadata state: checking -> watch);
 # launching while still "checking" no-ops the watch and the replay never comes
