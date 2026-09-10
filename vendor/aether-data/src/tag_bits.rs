@@ -1,0 +1,38 @@
+//! ADR-0064 bit-layout constants for tagged opaque ids.
+//!
+//! `[tag: 4 bits | hash: 60 bits]`. The tag identifies the id space
+//! (mailbox / kind / handle); the hash is the low 60 bits of an
+//! FNV-1a output (mailbox, kind) or a counter (handle). `0x0` is
+//! reserved as an invalid sentinel — a zero-initialised `u64` is
+//! never a valid tagged id.
+
+/// Bit-shift placing the 4-bit tag in the high nibble of a `u64`.
+/// `id = (tag as u64 << TAG_SHIFT) | (hash & HASH_MASK)`.
+pub const TAG_SHIFT: u32 = 60;
+
+/// Mask isolating the 60-bit hash body inside a tagged id. Drops
+/// the natural high 4 bits of the hash output before the tag bits
+/// OR in.
+pub const HASH_MASK: u64 = 0x0FFF_FFFF_FFFF_FFFF;
+
+/// Tag value for mailbox ids (ADR-0029).
+pub const TAG_MAILBOX: u8 = 0x1;
+
+/// Tag value for kind ids (ADR-0030).
+pub const TAG_KIND: u8 = 0x2;
+
+/// Tag value for reply-handle ids (ADR-0045).
+pub const TAG_HANDLE: u8 = 0x3;
+
+/// Tag value for DAG ids (ADR-0047). Substrate-minted, counter-backed
+/// per submitted DAG.
+pub const TAG_DAG: u8 = 0x4;
+
+/// Tag value for native-transform ids (ADR-0048). Name-hashed global
+/// identity for a registered transform.
+pub const TAG_TRANSFORM: u8 = 0x5;
+
+/// Tag value for thread ids (ADR-0088 §7). Name-hashed identity for an
+/// OS thread (`aether-worker-N`, `aether-root-<NAMESPACE>`, …),
+/// reversed to a display name through the inventory.
+pub const TAG_THREAD: u8 = 0x6;

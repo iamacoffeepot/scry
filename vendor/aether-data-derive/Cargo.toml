@@ -1,0 +1,15 @@
+[package]
+name = "aether-data-derive"
+version = "0.3.0-alpha"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "Vendored snapshot of aether's data derives; see vendor/README.md."
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full", "visit"] }

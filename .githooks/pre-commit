@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# Refuses a commit that would publish something private. Enable once per
+# clone with `git config core.hooksPath .githooks`.
+#
+# What it checks in the staged diff (added lines only):
+#   - a Riot ID from the local watch list (scripts/accounts.txt)
+#   - a value from .env (API key, webhook)
+#   - a PUUID-shaped token (78 url-safe base64 characters)
+#   - an absolute home path
+# and that the commit is stamped in UTC, so timestamps carry no timezone.
+
+set -uo pipefail
+root="$(git rev-parse --show-toplevel)"
+added="$(git diff --cached --diff-filter=AM -U0 | grep -E '^\+' | grep -vE '^\+\+\+')"
+[[ -z "$added" ]] && exit 0
+fail=0
+
+if [[ -f "$root/scripts/accounts.txt" ]]; then
+  while IFS= read -r line; do
+    id="$(sed -E 's/^[[:space:]]*//; s/[[:space:]]*\|.*$//' <<< "$line")"
+    [[ -z "$id" || "$id" == \#* ]] && continue
+    if grep -qiF -- "$id" <<< "$added"; then echo "pre-commit: tracked Riot ID '$id' in staged changes"; fail=1; fi
+  done < "$root/scripts/accounts.txt"
+fi
+
+if [[ -f "$root/.env" ]]; then
+  while IFS='=' read -r _ value; do
+    value="${value%\"}"; value="${value#\"}"
+    [[ ${#value} -lt 12 ]] && continue
+    if grep -qF -- "$value" <<< "$added"; then echo "pre-commit: a .env value is in staged changes"; fail=1; fi
+  done < <(grep -E '^[A-Za-z_]+=' "$root/.env")
+fi
+
+if grep -qE '[A-Za-z0-9_-]{78}' <<< "$added"; then echo "pre-commit: PUUID-shaped token in staged changes"; fail=1; fi
+if grep -qE '(/Users/|/home/)[A-Za-z0-9._-]+|[A-Za-z]:\\Users\\' <<< "$added"; then echo "pre-commit: absolute home path in staged changes"; fail=1; fi
+
+if [[ "$(date +%z)" != "+0000" ]]; then
+  echo "pre-commit: commit with TZ=UTC so the timestamp carries no timezone (e.g. 'TZ=UTC git commit')"
+  fail=1
+fi
+
+exit "$fail"

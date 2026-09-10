@@ -1,0 +1,23 @@
+# --- rust build artifacts ---
+/target/
+
+# --- archived match dumps (raw Riot data for offline analysis) ---
+/archive/
+
+# --- secrets / env ---
+.env
+.env.*
+!.env.example
+
+# --- OS / editor ---
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# --- Claude Code ---
+.claude/
+
+# --- poller ---
+/scripts/accounts.txt
+/state/

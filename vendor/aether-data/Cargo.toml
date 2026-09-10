@@ -1,0 +1,22 @@
+[package]
+name = "aether-data"
+version = "0.3.0-alpha"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "Vendored snapshot of aether's data layer; see vendor/README.md."
+
+[features]
+# Re-export the `Kind` / `Schema` / `Storage` derives from `aether-data-derive`.
+derive = ["dep:aether-data-derive"]
+
+[dependencies]
+aether-data-derive = { path = "../aether-data-derive", optional = true }
+bytemuck = { version = "1.19", default-features = false, features = ["derive"] }
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+uuid = { version = "1", default-features = false, features = ["serde"] }
+
+# Native-side auto-collection of derived kinds; `inventory` needs std, so it is
+# target-gated exactly as upstream.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+inventory = "0.3"
