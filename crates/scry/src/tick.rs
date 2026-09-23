@@ -426,10 +426,25 @@ async fn try_game_clips(
             tracing::info!(%platform, game_id, riot_id = %job.riot_id, "clips not ready (will retry)");
             continue;
         }
-        // The edit path appends `clips_attached` on success.
-        crate::post_from_archive(&post_cli(cli, &job.riot_id, &dir, /* edit */ true), &dir).await?;
-        tracing::info!(%platform, game_id, riot_id = %job.riot_id, "clips attached");
-        attached += 1;
+        // The edit path appends `clips_attached` on success. A deleted post
+        // can never take the clips: abandon the perspective rather than
+        // failing the pass and re-recording the game every tick.
+        match crate::post_from_archive(&post_cli(cli, &job.riot_id, &dir, /* edit */ true), &dir).await {
+            Ok(()) => {
+                tracing::info!(%platform, game_id, riot_id = %job.riot_id, "clips attached");
+                attached += 1;
+            }
+            Err(error) if error.chain().any(|e| e.is::<crate::discord::MessageGone>()) => {
+                tracing::info!(%platform, game_id, riot_id = %job.riot_id, "posted message was deleted; abandoning clips");
+                journal.append(&ClipsAbandoned {
+                    platform: platform.clone(),
+                    game_id,
+                    tries: job.tries + 1,
+                    riot_id: Some(job.riot_id.clone()),
+                })?;
+            }
+            Err(error) => return Err(error),
+        }
     }
     Ok(ClipOutcome::Recorded(attached))
 }

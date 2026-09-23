@@ -101,10 +101,31 @@ impl Webhook {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
+            if status == reqwest::StatusCode::NOT_FOUND && is_unknown_message(&body) {
+                return Err(MessageGone.into());
+            }
             bail!("Discord webhook returned {status}: {body}");
         }
         Ok(resp)
     }
+}
+
+/// The edited message no longer exists (someone deleted the post): no retry
+/// can succeed, so the caller gives up on it instead of failing again.
+#[derive(Debug)]
+pub struct MessageGone;
+
+impl std::fmt::Display for MessageGone {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the posted Discord message was deleted")
+    }
+}
+
+impl std::error::Error for MessageGone {}
+
+/// Discord's `Unknown Message` error body (JSON error code 10008).
+fn is_unknown_message(body: &str) -> bool {
+    serde_json::from_str::<Value>(body).ok().and_then(|v| v.get("code").and_then(Value::as_u64)) == Some(10008)
 }
 
 // Components V2 — https://discord.com/developers/docs/components/reference
